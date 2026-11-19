@@ -1,12 +1,24 @@
 # futty
 
-**Rust로 만든 Windows용 3D 씬 에디터와 게임 런타임.** 장면을 편집하고 바로 플레이한 뒤, 에셋과 함께 Windows 게임으로 내보낼 수 있습니다.
+**AI가 게임을 제작할 때 사용하는 Rust 기반 3D 게임 엔진.** Futty의 최우선 사용자는 AI 에이전트입니다. AI가 MCP/CLI로 프로젝트·씬·에셋·스크립트·테스트·빌드를 직접 다루고, 사람용 에디터는 선택적으로 제작 결과를 확인하고 수정하는 도구로 둡니다.
+
+현재는 3D 에디터와 게임 런타임, Windows 게임 내보내기 및 **기초 MCP 도구 5개**가 구현되어 있습니다. AI가 게임 제작의 전 과정을 자동화하는 기능은 [AI-first 로드맵](docs/ai-roadmap.md)에 따라 확장할 계획입니다.
 
 [![Windows CI](https://github.com/hwanghj09/futty/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hwanghj09/futty/actions/workflows/ci.yml)
 
 ![Futty Editor에서 Pulse Range를 연 화면. 왼쪽에 오브젝트 계층과 1인칭 미리보기, 오른쪽에 3D 뷰포트와 카메라 속성이 보입니다.](docs/images/futty-editor.jpg)
 
-## 빠르게 시작하기
+## AI에서 Futty 사용하기 (현재 MCP)
+
+현재 MCP는 씬 생성·조회, 배경 변경, 카메라 추가·선택을 지원합니다. 오브젝트/컴포넌트/에셋/스크립트/HUD 전체 편집과 게임 자동 테스트·빌드 API는 아직 구현할 예정입니다. Windows에서 Rust/MSVC를 설치한 뒤 MCP 서버를 빌드하고 Codex에 연결할 수 있습니다.
+
+1. cargo build --locked -p futty-mcp
+2. PowerShell에서 $workspace = (Resolve-Path .).Path 실행
+3. codex mcp add futty -- "$workspace\target\debug\futty-mcp.exe" "$workspace"
+
+[MCP 연결 상세 가이드](docs/guide.md#codex에서-futty-mcp-사용하기) · [AI-first 개발 로드맵](docs/ai-roadmap.md)
+
+## 사람용 에디터 실행 (선택적)
 
 Windows x64에서 Git, Rustup, Visual Studio C++ Build Tools의 **MSVC**와 **Windows SDK**가 필요합니다. Rust 버전은 `rust-toolchain.toml`에 고정되어 있습니다.
 
@@ -52,7 +64,7 @@ cargo run --locked -p futty-editor -- --edit "examples/pulse-range/Pulse Range.f
 
 ## 문서
 
-- [Futty AI 게임 엔진 로드맵](docs/ai-roadmap.md)
+- [Futty AI-first 게임 제작 로드맵](docs/ai-roadmap.md)
 - [에디터 사용 가이드](docs/guide.md)
 - [Codex에서 Futty MCP 연결](docs/guide.md#codex에서-futty-mcp-사용하기)
 - [Windows 게임 내보내기](docs/guide.md#windows-게임-내보내기)

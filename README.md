@@ -52,6 +52,7 @@ cargo run --locked -p futty-editor -- --edit "examples/pulse-range/Pulse Range.f
 
 ## 문서
 
+- [Futty AI 게임 엔진 로드맵](docs/ai-roadmap.md)
 - [에디터 사용 가이드](docs/guide.md)
 - [Codex에서 Futty MCP 연결](docs/guide.md#codex에서-futty-mcp-사용하기)
 - [Windows 게임 내보내기](docs/guide.md#windows-게임-내보내기)

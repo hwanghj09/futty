@@ -1,0 +1,20 @@
+[package]
+name = "futty-editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+futty-core.workspace = true
+futty-assets.workspace = true
+futty-audio.workspace = true
+futty-render.workspace = true
+futty-runtime.workspace = true
+glam.workspace = true
+uuid.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu", "accesskit", "persistence", "x11"] }
+egui_stack = { version = "0.22.1", features = ["serde"] }
+serde.workspace = true
+ron = "0.12"
+tempfile = "3"
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "wayland"] }

@@ -1,0 +1,10 @@
+[package]
+name = "futty-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true
+uuid.workspace = true

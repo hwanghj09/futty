@@ -1,0 +1,162 @@
+# futty Editor 사용 가이드
+
+Windows용 Rust 3D 엔진 에디터입니다. 자체 wgpu/WGSL 렌더러가 GLB 메시와 텍스처를 깊이 버퍼가 있는 오프스크린 텍스처에 그립니다. 에디터는 eframe의 winit 창과 egui-wgpu UI를 사용합니다.
+
+## 실행
+
+Windows x64에서 Rustup과 Visual Studio C++ Build Tools의 MSVC 및 Windows SDK를 설치한 뒤 실행합니다. 저장소의 `rust-toolchain.toml`이 Rust 1.99.0을 선택합니다.
+
+```powershell
+cargo run --locked -p futty-editor
+```
+
+## 작업 공간
+
+- 기본 배치는 왼쪽 **Hierarchy**, 중앙 **Scene / Game**, 오른쪽 **Inspector**, 아래 **Project**입니다. **Console**, **Physics**, **Script Editor**는 탭이나 Scene을 우클릭한 뒤 **Panels**에서 엽니다. Console과 Physics는 마지막 Play 기록을 Stop 이후에도 표시합니다.
+- 탭을 다른 탭 옆에 놓으면 같은 그룹에 들어가고, 패널 가장자리에 놓으면 새 영역이 생깁니다. 구분선을 드래그해 크기를 조절합니다. 탭을 오른쪽 클릭해 **Eject**로 앱 안에 띄우고 **Dock in Main Window**로 다시 붙일 수 있습니다.
+- 닫은 탭은 **Window** 메뉴에서 다시 열고, **Layout → Reset to Default**로 기본 배치로 돌아갑니다. 마지막 배치는 다음 실행에 복원됩니다.
+
+## 편집
+
+- **Hierarchy → + Add**에서 큐브, 구체, 원기둥, 원뿔, 평면을 추가합니다. 새 도형은 바로 선택되며 카메라가 그 도형에 초점을 맞춥니다. **Inspector**에서 이름, 위치, 회전, 크기, 색상을 수정합니다.
+- **Hierarchy → Search objects**에 이름을 입력하면 목록이 즉시 좁혀집니다. Hierarchy와 뷰포트에서 **Ctrl+클릭**으로 선택을 추가하거나 해제합니다. Hierarchy에서는 **Shift+클릭**으로 보이는 행의 범위를, **Ctrl+A**로 현재 필터에 맞는 전체를 선택합니다.
+- **Inspector → Parent**로 부모를 지정하거나 Hierarchy의 행을 다른 오브젝트 위로 드래그합니다. 화면상의 위치·회전·크기를 유지하며 부모가 바뀝니다. 씬 이름이나 Hierarchy 빈 공간에 놓으면 루트로 이동합니다. 복제와 삭제는 선택한 오브젝트의 하위 계층에도 적용됩니다.
+- **Move** 모드에서 X/Y/Z 화살표를 끌면 해당 축으로 이동합니다. **Select** 모드에서는 이동 도구를 숨깁니다.
+- 편집 모드에서 선택한 오브젝트에 **G**는 이동, **S**는 크기, **R**은 회전을 시작합니다. 마우스를 움직이거나 수치를 입력하고 **Enter** 또는 왼쪽 클릭으로 적용합니다. **Esc** 또는 오른쪽 클릭으로 취소합니다. **X/Y/Z**는 축을 고릅니다. 크기는 오브젝트의 로컬 축으로 조절합니다.
+- **Scene 우클릭 → Transform Settings**에서 이동·회전의 **World / Local** 축, **Selection Center / Active Object / Individual Origins** 피벗을 고릅니다. Local의 기준은 마지막으로 선택한 오브젝트입니다. 이동 기즈모도 같은 축과 피벗을 사용합니다.
+- 같은 메뉴의 **Snap**과 Move·Rotate·Scale 간격으로 마우스 변형을 일정 단위에 맞춥니다. **Ctrl**을 누르는 동안 임시 스냅도 가능합니다. 키보드로 직접 입력한 수치는 그대로 적용됩니다. 설정은 다음 실행에도 복원됩니다.
+- 정확한 값을 적용하려면 **G → X → 2 → Enter**로 X 방향 2만큼 이동하거나, **R → Y → 90 → Enter**로 Y축 90도 회전합니다. **S → 2 → Enter**는 크기를 두 배로 만듭니다. 한 번의 적용은 Undo 한 번으로 되돌릴 수 있습니다.
+- 단축키가 입력되면 뷰포트 상단에 키, 변형 모드, 축과 실시간 값이 표시됩니다. 축을 고르면 해당 축의 색상으로 가이드가 나타나고, 적용·취소 결과도 잠시 표시됩니다.
+- Scene이나 Hierarchy에서 오브젝트를 우클릭하면 초점 맞추기, 복제, 삭제, 오브젝트 추가 메뉴가 열립니다. Scene 우클릭 메뉴에는 선택·이동 도구, 그리드, 콜라이더 표시 옵션도 있습니다. 우클릭 드래그로 카메라를 돌리고, 우클릭 중 **WASD**로 이동합니다. 가운데 버튼 드래그는 팬, 휠은 줌, **F**는 선택 오브젝트에 초점을 맞춥니다.
+- **Ctrl+D**로 복제하고 **Delete**로 삭제합니다. **Ctrl+Z / Ctrl+Y**로 변경을 되돌리거나 다시 적용합니다.
+- 여러 오브젝트에 **G/S/R**, 이동 기즈모, 복제·삭제를 한 번에 적용할 수 있습니다. 회전·크기 조절은 묶음의 중심을 기준으로 합니다. 부모와 자식을 함께 선택하면 자식은 부모를 따라갑니다. Inspector는 마지막으로 선택한 오브젝트의 속성을 표시합니다.
+- **F**는 선택한 묶음 전체에 초점을 맞춥니다. Hierarchy에서 한 행을 더블클릭하면 해당 오브젝트로 이동합니다.
+- **File → Save Scene**으로 씬을 저장하고 **Open Scene**으로 다시 엽니다. RON 파일에는 포맷 버전과 오브젝트 UUID가 기록됩니다.
+- **Play**를 누르면 복사된 ECS 월드에서 회전이 활성화된 큐브가 움직입니다. **Stop**을 누르면 원래 씬과 카메라로 돌아갑니다.
+
+## 모델과 텍스처
+
+1. 하단 **Project → Import…**에서 [Workshop Crate.glb](../examples/asset-preview/Workshop%20Crate.glb)를 엽니다. 모델이 씬에 배치됩니다. 에셋을 우클릭해 **Place**를 누르거나 더블클릭으로 같은 모델을 추가합니다.
+2. [Workshop Grid.png](../examples/asset-preview/Workshop%20Grid.png)를 가져옵니다. 큐브나 UV가 있는 모델을 선택하고 Project에서 PNG를 우클릭해 **Apply to Selection**을 누릅니다. Inspector에서 **Default material**로 되돌릴 수 있습니다.
+3. 씬을 저장하면 에셋 원본을 씬과 같은 폴더의 `Assets/Futty/`에 UUID 이름으로 복사합니다. 다른 위치로 옮길 때는 씬 RON과 해당 폴더를 함께 옮깁니다. **Save Scene As…**는 새 위치에 필요한 에셋을 복사합니다.
+
+씬 포맷 v15는 FPS 연습장 설정을 지원합니다. v1~v14 씬도 열 수 있습니다. 누락된 모델은 뷰포트에서 회색 대체 큐브로, Project 목록에서 오류 문구로 표시합니다.
+
+## 공유 머티리얼
+
+1. **Project 빈 공간 우클릭 → New Material**로 재질을 만듭니다. Project의 **MAT** 항목을 클릭하면 기존 Inspector에서 이름, 기본색, PNG 텍스처, **Roughness**, 발광색과 **Emission** 강도를 편집합니다.
+2. 도형이나 GLB 오브젝트를 선택하고 MAT 항목을 우클릭해 **Apply to Selection**으로 적용합니다. 여러 오브젝트를 선택하면 한 번에 적용됩니다. 오브젝트의 **Inspector → Material**에서도 재질을 선택할 수 있습니다.
+3. 같은 재질을 쓰는 오브젝트는 수정이 즉시 함께 반영됩니다. **Tint**로 오브젝트별 색을 곱할 수 있습니다. 새로운 재질을 적용하면 Tint는 흰색으로 초기화됩니다. **Edit Shared Material**로 재질 편집을 열고 **Back to Object**로 돌아옵니다.
+4. **Per-object material**을 선택하면 기존 개별 색상·텍스처 설정을 사용합니다. PNG의 **Apply to Selection**은 해당 오브젝트를 개별 재질로 전환합니다. 사용 중인 재질과 재질에 연결된 PNG는 Project에서 삭제할 수 없습니다.
+
+머티리얼은 씬과 함께 저장되며 Undo/Redo, Play와 Windows 내보내기에 반영됩니다. Roughness는 광택의 넓이와 강도를 조절하는 간단한 Blinn–Phong 모델입니다. 발광은 표면 자체의 밝기에 반영되며 주변을 비추거나 블룸을 만들지는 않습니다. 공유 재질은 불투명 3D 메시용이고 Sprite3D는 기존 Tint와 투명도를 사용합니다.
+
+## 프리팹
+
+1. Hierarchy에서 루트로 삼을 오브젝트 하나를 선택하고 우클릭 → **Create Prefab**을 누릅니다. 자식 계층과 기본 도형·모델, Sprite3D, 카메라·조명, 물리·스크립트·오디오, 공유 머티리얼 연결을 함께 저장합니다. Project 빈 공간의 **Create Prefab from Selection**에서도 만들 수 있습니다.
+2. Project의 **PREFAB** 항목을 클릭하면 기존 Inspector에서 이름과 저장된 계층을 확인합니다. **Place in Scene**, 항목 더블클릭, 우클릭 → **Place in Scene**으로 반복 배치합니다. 새 계층은 기존 오브젝트 옆의 바닥에 배치되며 루트가 선택됩니다. **G / R / S**로 전체 계층을 조절합니다.
+3. 생성과 한 번의 배치는 각각 Undo 한 번으로 되돌릴 수 있습니다. 프리팹은 씬에 포함되어 저장·복원되고, 프리팹이 참조하는 에셋과 재질도 삭제로부터 보호합니다. **Remove Prefab**은 Project의 저장된 틀을 지우며 이미 배치된 오브젝트는 유지합니다.
+
+현재 프리팹은 씬 안에 저장되는 독립 복제 방식입니다. 배치 후 수정한 오브젝트에서 새 프리팹을 만들 수 있으며, 원본 수정의 자동 전파와 씬 사이 프리팹 파일 공유는 후속 범위입니다. 공유 머티리얼의 수정은 기존 방식대로 반영됩니다. 기존 오디오 리스너가 있으면 새 배치에서는 중복 리스너를 제외합니다. Windows 게임에는 배치된 오브젝트와 필요한 에셋이 포함됩니다.
+
+## 게임 카메라
+
+1. **Hierarchy → + Add → Camera**에서 카메라를 추가합니다. 첫 카메라는 **Main Camera**가 되며, 추가할 때 현재 Scene 화면의 위치와 방향을 가져옵니다.
+2. **Inspector → Object → Camera**에서 **Perspective**, **Orthographic**, 시야각 또는 정사영 크기, Near/Far 클리핑을 조절합니다. 다른 구도로 맞추려면 Scene에서 구도를 잡고 Hierarchy에서 카메라를 우클릭해 **Align to Scene View**를 누릅니다.
+3. 카메라 우클릭 메뉴의 **Preview in Game**으로 구도를 비교하고 **Make Main Camera**로 실행할 카메라를 지정합니다. 선택된 카메라의 시야 범위는 **Scene**에 표시됩니다. **Play**와 Windows 게임은 Main Camera를 사용합니다. 카메라의 Transform은 부모와 연결하거나 Rhai로 움직일 수 있습니다.
+4. 카메라가 없는 씬은 Scene 카메라로 미리 보고 실행할 수 있습니다.
+
+## Scene 카메라와 배경
+
+- **Alt + 왼쪽 드래그**로 화면 중심을 기준으로 회전합니다. **F** 또는 **Camera 메뉴의 Frame Selection**으로 선택한 오브젝트를, **Frame All**로 씬 전체를 화면에 맞춥니다.
+- **Camera 메뉴의 Reset View**로 Scene 카메라를 초기 위치로 되돌립니다. **Fly Speed**는 우클릭 상태에서 WASD·Q/E로 이동하는 속도를 조절합니다.
+- **Background 메뉴**에서 **Sky**와 **Solid**를 전환합니다. 설정은 씬에 저장되고 Game 미리보기, Play, 내보낸 Windows 게임에도 반영됩니다. 새 씬은 Sky로 시작하고 기존 씬은 Solid로 열립니다.
+
+## Codex에서 Futty MCP 사용하기
+
+Windows에서 프로젝트 루트의 PowerShell을 열고 서버를 빌드한 뒤 Codex에 등록합니다.
+
+```powershell
+cargo build --locked -p futty-mcp
+$workspace = (Resolve-Path .).Path
+codex mcp add futty -- "$workspace\target\debug\futty-mcp.exe" "$workspace"
+```
+
+- `scene_create`와 `scene_inspect`로 씬을 만들고 배경, 오브젝트 수, 카메라 UUID를 확인합니다.
+- `scene_set_background`로 `sky` 또는 `solid`를 저장합니다. `scene_add_camera`로 위치와 바라볼 점을 지정하고 `scene_set_main_camera`에 카메라 UUID를 넘겨 게임 카메라를 선택합니다.
+- 경로는 등록한 Futty 폴더 기준의 상대 `.ron` 경로를 사용합니다. 에디터에서 열린 씬은 MCP 편집 전에 저장하고 닫은 뒤, 편집이 끝나면 다시 엽니다.
+
+## Pulse Range
+
+움직이는 드론을 상대로 45초 동안 점수를 쌓는 FPS 연습장입니다. [Pulse Range 씬](../examples/pulse-range/Pulse%20Range.futty.scene.ron)을 열고 **Play**를 누릅니다. 단독 실행과 모델링 원본은 [Pulse Range 문서](../examples/pulse-range/README.md)에 있습니다.
+
+## 조명
+
+- **Scene 우클릭 → Add Object → Light** 또는 **Hierarchy → + Add → Light**에서 조명을 추가합니다.
+- **Directional Light**는 회전 방향으로 씬 전체를 비춥니다. **Point Light**는 배치한 위치에서 주위를 비추고 **Range**에 따라 거리가 멀수록 어두워집니다. Inspector에서 색과 밝기를 변경할 수 있습니다.
+- Scene에서 조명을 선택하면 방향이나 범위가 표시됩니다. 메시 조명은 Game과 Windows 게임에도 반영됩니다. 조명을 추가하지 않은 씬은 기본 조명을 사용합니다. 첫 조명 8개가 렌더링에 반영됩니다.
+- **Directional Light → Cast Shadows**로 메시 그림자를 켜고 **Shadow Distance**로 카메라에서 그림자가 적용되는 거리를 조절합니다. 기존 씬의 방향광은 토글을 켜서 사용합니다. 켜진 첫 방향광이 그림자를 만들고 다른 조명의 밝기는 그대로 합산됩니다.
+
+## Sprite3D
+
+1. **Project → Import…**에서 PNG를 가져온 뒤 에셋을 우클릭해 **Place Sprite**를 누르거나 더블클릭합니다. 스프라이트는 이미지 비율과 투명도를 유지합니다.
+2. **Inspector → Object → Sprite3D**에서 텍스처, 너비·높이, 빌보드 모드를 설정합니다. **Face camera**는 카메라 화면을 향하고, **Upright**는 Y축을 세운 채 카메라 쪽으로 돌며, **Fixed**는 오브젝트의 회전을 따릅니다.
+3. **File → Sprite Playground**를 열고 우클릭 드래그로 카메라를 돌리면 세 가지 모드를 비교할 수 있습니다.
+
+## 물리
+
+1. **File → Physics Playground**를 선택하고 **Play**를 누릅니다. 큐브가 떨어져 바닥과 경사로에 부딪힙니다. 탭 우클릭 **→ Panels → Physics**에서 충돌과 트리거 이벤트를 확인할 수 있습니다.
+2. 직접 구성할 때는 씬 루트에서 오브젝트를 선택하고 **Inspector → Physics → Rigid body**를 켭니다. 떨어지는 큐브에는 **Dynamic**, 바닥에는 **Fixed**를 지정합니다. **Kinematic**의 **Rotate in Play**는 회전하는 플랫폼처럼 다른 강체와 충돌하는 물체를 만듭니다.
+3. **Fit to mesh**로 상자 충돌체를 모델에 맞추거나 **Local size / Local center**를 조절합니다. **Trigger sensor**는 물체의 통과를 허용하면서 진입·이탈을 기록합니다.
+
+물리는 Play 중 60 Hz로 실행됩니다. **Stop**을 누르면 편집 씬의 위치와 회전으로 돌아갑니다. 현재 충돌체는 씬 루트에 있는 오브젝트의 상자 형태를 지원합니다.
+
+## Rhai 스크립트
+
+1. 오브젝트를 선택하고 **Inspector → Script → New script**를 누르거나 Project 빈 공간을 우클릭해 **New Script**를 누릅니다.
+2. Project의 스크립트를 더블클릭하거나 우클릭해 **Edit Code in VS Code**를 누르면 `.rhai` 파일이 열립니다. VS Code에서 **Ctrl+S**를 누르면 futty에 반영됩니다. 실행 중이었다면 **Stop → Play**로 새 코드를 실행합니다. VS Code가 없으면 내장 편집기 탭이 열립니다. 우클릭 메뉴의 **Edit in futty**로도 내장 편집기를 열 수 있습니다.
+3. **File → Script Playground → Play**에서는 **W/A/S/D**로 이동하고 **Space**로 올라갑니다. 탭 우클릭 **→ Panels → Console**에서 로그와 오류를 확인합니다. [Move.rhai](../examples/script-playground/Move.rhai)
+
+```rhai
+fn fields() {
+    #{ speed: 3.0 }
+}
+
+fn on_update(entity, dt) {
+    if key_down("D") {
+        translate(entity, param("speed") * dt, 0, 0);
+    }
+}
+```
+
+- `fields()`의 숫자·불리언·텍스트는 Inspector에서 오브젝트별로 조절합니다. `param("speed")`로 값을 읽고, `this.counter` 같은 상태는 오브젝트마다 이번 Play 동안 유지합니다.
+- 입력은 `key_down("Space")`처럼 실제 키 이름으로 읽습니다. 기존 `input_down("MoveForward")`도 사용할 수 있습니다.
+- 좌표는 부모 기준입니다. `get_position`, `set_position`, `translate`, `translate_local`, `rotate`, `rotate_y`를 사용할 수 있습니다. 이동·회전은 강체 없는 오브젝트와 Kinematic 강체에서, 크기 변경 `set_scale`은 강체 없는 오브젝트에서 지원합니다. Dynamic 강체는 월드 기준 `set_velocity`와 `add_impulse`로 조종합니다. 회전 단위는 도입니다.
+- 라이프사이클은 `on_start(entity)`, `on_update(entity, dt)`, `on_fixed_update(entity, dt)`, `on_collision_enter/exit(entity, other)`, `on_trigger_enter/exit(entity, other)`를 지원합니다. 스크립트는 자신이 붙은 오브젝트를 조종합니다. 오류가 난 인스턴스는 이번 Play에서 중지합니다.
+- 편집기에서 적용한 코드는 **Save Scene**으로 씬 파일에 저장합니다. 기존 `.rhai`는 **Project → Import…**로 가져온 뒤 에셋을 우클릭해 **Attach to Selection**으로 연결합니다. 가져온 스크립트를 편집기로 수정하면 씬에 편집한 소스가 저장됩니다.
+
+## Windows 게임 내보내기
+
+**File → Export Windows Game…**에서 저장한 씬의 출력 위치를 선택합니다. 만들어진 `*-Windows` 폴더는 씬, 참조 에셋, 실행 설정과 `Game.exe`를 포함합니다. 폴더 전체를 옮긴 뒤 `Game.exe`를 실행하면 에디터 없이 게임이 열립니다. 씬에 카메라가 없으면 내보내기 당시의 Scene 카메라로 실행합니다.
+
+Windows x64에서 CLI로도 실행할 수 있습니다. 출력은 아직 없는 폴더를 지정합니다. 씬에 카메라가 없으면 CLI는 기본 카메라를 사용합니다.
+
+```powershell
+futty-editor.exe --export .\Main.futty.scene.ron .\Main-Windows
+```
+
+## 검증
+
+```powershell
+cargo fmt --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+```
+
+## 오디오
+
+- **File → Audio Playground → Play**를 누르면 큐브가 트리거에 들어갈 때 차임이 한 번 재생됩니다.
+- WAV 또는 OGG Vorbis 클립을 **Project → Import…**로 가져옵니다. 에셋을 우클릭해 **Preview Audio**로 미리 듣고 **Attach to Selection**으로 선택한 오브젝트에 연결합니다.
+- **Inspector → Audio**에서 볼륨, 반복, 시작 조건을 편집합니다. **On Play**는 재생을 시작할 때, **On trigger enter**는 연결된 오브젝트가 트리거 진입 이벤트에 참여할 때 재생합니다. 씬에 오디오 리스너를 하나 추가해 전체 볼륨을 설정할 수 있습니다. **Stop**은 Play 중 재생한 사운드를 정지합니다.
+
+현재 모델 가져오기 범위는 정적 삼각형 GLB입니다. GLB의 텍스처는 파일에 내장되어야 하며 재질은 불투명 기본색 기준으로 렌더링합니다. 거리 감쇠·공간 팬닝, 애니메이션, 독립 플레이어, Laboratory Escape는 이후 단계입니다.

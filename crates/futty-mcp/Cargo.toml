@@ -1,0 +1,18 @@
+[package]
+name = "futty-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+futty-core.workspace = true
+futty-runtime.workspace = true
+glam.workspace = true
+rmcp = { version = "3.11", default-features = false, features = ["macros", "server", "transport-io"] }
+serde.workspace = true
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

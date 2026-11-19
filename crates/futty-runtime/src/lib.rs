@@ -1,0 +1,1282 @@
+use std::{
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    error::Error,
+    fs,
+    io::Write,
+    path::Path,
+};
+
+use bevy_ecs::{
+    prelude::{Component, World},
+    query::QueryState,
+};
+use futty_core::{Asset, AssetKind, CameraLens, CameraView, Light, Primitive, Surface, Transform};
+use glam::{Mat4, Quat, Vec3};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+mod audio;
+mod prefab;
+mod range;
+mod script;
+mod sprite;
+pub use audio::{AudioCue, AudioListener, AudioSource, AudioStart};
+pub use prefab::Prefab;
+pub use range::{MAGAZINE, ROUND_SECONDS, RangeConfig, RangeInput, RangeStatus};
+
+pub use physics::{Body, Motion, PhysicsEvent};
+use physics::{MAX_STEPS, Physics, STEP};
+use script::{Callback, Scripts};
+pub use script::{GameInput, MAX_SCRIPT_BYTES, ScriptFields, ScriptValue, inspect_script};
+pub use sprite::{Billboard, Sprite};
+
+type SceneResult<T> = Result<T, Box<dyn Error>>;
+const FORMAT_VERSION: u32 = 15;
+const MAX_AUDIO_CUES: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Object {
+    pub uuid: Uuid,
+    pub name: String,
+    pub transform: Transform,
+    pub color: [f32; 3],
+    pub spin: bool,
+    #[serde(default)]
+    pub parent: Option<Uuid>,
+    #[serde(default)]
+    pub mesh: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Primitive::is_cube")]
+    pub primitive: Primitive,
+    #[serde(default)]
+    pub texture: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<Uuid>,
+    #[serde(default)]
+    pub sprite: Option<Sprite>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<CameraLens>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<Light>,
+    #[serde(default)]
+    pub body: Option<Body>,
+    #[serde(default)]
+    pub script: Option<Uuid>,
+    #[serde(default)]
+    pub script_fields: ScriptFields,
+    #[serde(default)]
+    pub audio_source: Option<AudioSource>,
+    #[serde(default)]
+    pub audio_listener: Option<AudioListener>,
+}
+
+impl Object {
+    pub fn has_renderer(&self) -> bool {
+        self.camera.is_none() && self.light.is_none()
+    }
+
+    pub fn cube(name: String, translation: Vec3) -> Self {
+        Self {
+            uuid: Uuid::new_v4(),
+            name,
+            transform: Transform {
+                translation,
+                ..Default::default()
+            },
+            color: [0.42; 3],
+            spin: true,
+            parent: None,
+            mesh: None,
+            primitive: Primitive::Cube,
+            texture: None,
+            material: None,
+            sprite: None,
+            camera: None,
+            light: None,
+            body: None,
+            script: None,
+            script_fields: ScriptFields::new(),
+            audio_source: None,
+            audio_listener: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scene {
+    format_version: u32,
+    pub scene_uuid: Uuid,
+    pub name: String,
+    pub entities: Vec<Object>,
+    #[serde(default)]
+    pub assets: Vec<Asset>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub materials: BTreeMap<Uuid, Material>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub prefabs: BTreeMap<Uuid, Prefab>,
+    #[serde(default)]
+    pub script_sources: BTreeMap<Uuid, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_camera: Option<Uuid>,
+    #[serde(default)]
+    pub sky: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_range: Option<RangeConfig>,
+}
+
+impl Default for Scene {
+    fn default() -> Self {
+        Self {
+            format_version: FORMAT_VERSION,
+            scene_uuid: Uuid::new_v4(),
+            name: "Main".into(),
+            entities: vec![Object::cube("Cube".into(), Vec3::Y * 0.65)],
+            assets: Vec::new(),
+            materials: BTreeMap::new(),
+            prefabs: BTreeMap::new(),
+            script_sources: BTreeMap::new(),
+            main_camera: None,
+            sky: true,
+            training_range: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Material {
+    pub name: String,
+    pub color: [f32; 3],
+    pub texture: Option<Uuid>,
+    pub surface: Surface,
+}
+
+impl Default for Material {
+    fn default() -> Self {
+        Self {
+            name: "Material".into(),
+            color: [0.5; 3],
+            texture: None,
+            surface: Surface::default(),
+        }
+    }
+}
+
+impl Scene {
+    pub fn camera_index(&self, preferred: Option<Uuid>) -> Option<usize> {
+        let by_id = |id| {
+            self.entities
+                .iter()
+                .position(|object| object.uuid == id && object.camera.is_some())
+        };
+        preferred
+            .and_then(by_id)
+            .or_else(|| self.main_camera.and_then(by_id))
+            .or_else(|| {
+                self.entities
+                    .iter()
+                    .position(|object| object.camera.is_some())
+            })
+    }
+
+    pub fn camera_view(
+        &self,
+        index: usize,
+        hierarchy: &Hierarchy,
+        worlds: &[Mat4],
+        local: &[Transform],
+    ) -> Option<CameraView> {
+        let lens = self.entities[index].camera?;
+        let eye = worlds[index].w_axis.truncate();
+        let rotation = hierarchy.world_rotation(index, |index| local[index].rotation);
+        (lens.valid() && eye.is_finite() && rotation.is_normalized()).then_some(CameraView {
+            eye,
+            rotation,
+            lens,
+        })
+    }
+
+    fn validate(&self) -> SceneResult<()> {
+        if self.format_version != FORMAT_VERSION {
+            return Err(format!("Unsupported scene version {}", self.format_version).into());
+        }
+        if self.scene_uuid.is_nil() {
+            return Err("Missing scene UUID".into());
+        }
+        if self.main_camera.is_some_and(|id| {
+            !self
+                .entities
+                .iter()
+                .any(|object| object.uuid == id && object.camera.is_some())
+        }) {
+            return Err("Main Camera must reference a camera object in the scene".into());
+        }
+        if let Some(range) = &self.training_range {
+            range.validate(self)?;
+        }
+        let mut assets = HashMap::new();
+        for asset in &self.assets {
+            if asset.id.is_nil() || assets.insert(asset.id, asset.kind).is_some() {
+                return Err(format!("Missing or duplicate asset UUID: {}", asset.id).into());
+            }
+        }
+        for (id, source) in &self.script_sources {
+            if assets.get(id) != Some(&AssetKind::Script) || source.len() > MAX_SCRIPT_BYTES {
+                return Err(format!("Invalid script source: {id}").into());
+            }
+        }
+        for (id, material) in &self.materials {
+            if id.is_nil()
+                || assets.contains_key(id)
+                || material.name.trim().is_empty()
+                || material.name.len() > 256
+                || !material
+                    .color
+                    .iter()
+                    .all(|value| (0.0..=1.0).contains(value))
+                || !material.surface.valid()
+                || material
+                    .texture
+                    .is_some_and(|id| assets.get(&id) != Some(&AssetKind::Texture))
+            {
+                return Err(format!("Invalid material: {}", material.name).into());
+            }
+        }
+        self.validate_objects(&self.entities, &assets)?;
+        for (id, prefab) in &self.prefabs {
+            if id.is_nil()
+                || assets.contains_key(id)
+                || self.materials.contains_key(id)
+                || prefab.name.trim().is_empty()
+                || prefab.name.len() > 256
+                || prefab.entities.is_empty()
+                || prefab.entities[0].parent.is_some()
+                || prefab
+                    .entities
+                    .iter()
+                    .skip(1)
+                    .any(|object| object.parent.is_none())
+            {
+                return Err(format!("Invalid prefab: {}", prefab.name).into());
+            }
+            self.validate_objects(&prefab.entities, &assets)
+                .map_err(|error| format!("Prefab {}: {error}", prefab.name))?;
+        }
+        Ok(())
+    }
+
+    fn validate_objects(
+        &self,
+        objects: &[Object],
+        assets: &HashMap<Uuid, AssetKind>,
+    ) -> SceneResult<()> {
+        let mut ids = HashSet::new();
+        let mut listener = false;
+        for object in objects {
+            if object.uuid.is_nil() || !ids.insert(object.uuid) {
+                return Err(format!("Missing or duplicate object UUID: {}", object.uuid).into());
+            }
+            let transform = object.transform;
+            if object
+                .material
+                .is_some_and(|id| !self.materials.contains_key(&id))
+            {
+                return Err(format!("Missing material on {}", object.name).into());
+            }
+            if !transform.translation.is_finite()
+                || !transform.rotation.is_normalized()
+                || !transform.scale.is_finite()
+                || transform.scale.min_element() < 0.01
+                || !object.color.iter().all(|value| (0.0..=1.0).contains(value))
+            {
+                return Err(format!("Invalid transform or color on {}", object.name).into());
+            }
+            for (id, kind) in [
+                (object.mesh, AssetKind::Model),
+                (object.texture, AssetKind::Texture),
+                (
+                    object.sprite.map(|sprite| sprite.texture),
+                    AssetKind::Texture,
+                ),
+                (object.script, AssetKind::Script),
+            ] {
+                if id.is_some_and(|id| assets.get(&id) != Some(&kind)) {
+                    return Err(format!("Invalid asset reference on {}", object.name).into());
+                }
+            }
+            if object.sprite.is_some_and(|sprite| !sprite.valid()) {
+                return Err(format!("Invalid Sprite3D size on {}", object.name).into());
+            }
+            if object.camera.is_some_and(|lens| !lens.valid()) {
+                return Err(format!("Invalid camera settings on {}", object.name).into());
+            }
+            if object.light.is_some_and(|light| !light.valid()) {
+                return Err(format!("Invalid light settings on {}", object.name).into());
+            }
+            if object.script_fields.len() > 64
+                || object
+                    .script_fields
+                    .iter()
+                    .any(|(name, value)| name.is_empty() || name.len() > 64 || !value.valid())
+            {
+                return Err(format!("Invalid script field on {}", object.name).into());
+            }
+            if let Some(body) = object.body {
+                if object.parent.is_some() {
+                    return Err(
+                        format!("Physics body {} must be at the scene root", object.name).into(),
+                    );
+                }
+                if !body.valid(transform) {
+                    return Err(format!("Invalid physics settings on {}", object.name).into());
+                }
+            }
+            if let Some(source) = object.audio_source
+                && (!assets.get(&source.clip).is_some_and(|kind| kind.is_audio())
+                    || !(0.0..=1.0).contains(&source.volume))
+            {
+                return Err(format!("Invalid audio source on {}", object.name).into());
+            }
+            if let Some(config) = object.audio_listener {
+                if listener || !(0.0..=1.0).contains(&config.volume) {
+                    return Err(
+                        format!("Invalid or duplicate audio listener on {}", object.name).into(),
+                    );
+                }
+                listener = true;
+            }
+        }
+        Hierarchy::new(objects)?;
+        Ok(())
+    }
+
+    pub fn load(path: &Path) -> SceneResult<Self> {
+        let mut scene: Self = ron::from_str(&fs::read_to_string(path)?)?;
+        if (1..FORMAT_VERSION).contains(&scene.format_version) {
+            scene.format_version = FORMAT_VERSION;
+        }
+        scene.validate()?;
+        Ok(scene)
+    }
+
+    pub fn save(&self, path: &Path) -> SceneResult<()> {
+        self.write_scene(path, true)
+    }
+
+    pub fn save_new(&self, path: &Path) -> SceneResult<()> {
+        self.write_scene(path, false)
+    }
+
+    fn write_scene(&self, path: &Path, replace: bool) -> SceneResult<()> {
+        self.validate()?;
+        let encoded = ron::ser::to_string_pretty(self, Default::default())?;
+        let directory = path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut temp = tempfile::NamedTempFile::new_in(directory)?;
+        temp.write_all(encoded.as_bytes())?;
+        temp.as_file().sync_all()?;
+        if replace {
+            temp.persist(path)?;
+        } else {
+            temp.persist_noclobber(path)?;
+        }
+        Ok(())
+    }
+
+    pub fn hierarchy(&self) -> SceneResult<Hierarchy> {
+        Hierarchy::new(&self.entities)
+    }
+}
+
+pub struct Hierarchy {
+    pub parents: Vec<Option<usize>>,
+    pub order: Vec<(usize, usize)>,
+}
+
+impl Hierarchy {
+    fn new(objects: &[Object]) -> SceneResult<Self> {
+        let indices: HashMap<_, _> = objects
+            .iter()
+            .enumerate()
+            .map(|(index, object)| (object.uuid, index))
+            .collect();
+        let mut children = vec![Vec::new(); objects.len()];
+        let mut roots = Vec::new();
+        let mut parents = Vec::with_capacity(objects.len());
+        for (index, object) in objects.iter().enumerate() {
+            let parent = match object.parent {
+                Some(id) => {
+                    let &parent = indices
+                        .get(&id)
+                        .ok_or_else(|| format!("Missing parent of {}", object.name))?;
+                    children[parent].push(index);
+                    Some(parent)
+                }
+                None => {
+                    roots.push(index);
+                    None
+                }
+            };
+            parents.push(parent);
+        }
+        let mut stack: Vec<_> = roots.iter().rev().map(|&index| (index, 0)).collect();
+        let mut order = Vec::with_capacity(objects.len());
+        while let Some((index, depth)) = stack.pop() {
+            order.push((index, depth));
+            stack.extend(
+                children[index]
+                    .iter()
+                    .rev()
+                    .map(|&child| (child, depth + 1)),
+            );
+        }
+        if order.len() != objects.len() {
+            return Err("Scene hierarchy contains a cycle".into());
+        }
+        Ok(Hierarchy { parents, order })
+    }
+    pub fn world_rotation(&self, index: usize, local: impl Fn(usize) -> Quat) -> Quat {
+        let mut rotation = local(index);
+        let mut parent = self.parents[index];
+        while let Some(index) = parent {
+            rotation = local(index) * rotation;
+            parent = self.parents[index];
+        }
+        rotation.normalize()
+    }
+
+    pub fn world_matrices(&self, local: impl Fn(usize) -> Mat4) -> Vec<Mat4> {
+        let mut matrices = vec![Mat4::IDENTITY; self.parents.len()];
+        for &(index, _) in &self.order {
+            let parent = self.parents[index].map_or(Mat4::IDENTITY, |parent| matrices[parent]);
+            matrices[index] = parent * local(index);
+        }
+        matrices
+    }
+}
+
+#[derive(Component)]
+struct RuntimeObject {
+    uuid: Uuid,
+    name: String,
+    transform: Transform,
+    color: [f32; 3],
+    spin: bool,
+    body: Option<(rapier3d::prelude::RigidBodyHandle, Motion)>,
+    kinematic_target: Option<Transform>,
+    script: Option<Uuid>,
+}
+
+impl RuntimeObject {
+    fn run_script(&mut self, scripts: &mut Scripts, physics: &mut Physics, callback: Callback) {
+        if let Some(script) = self.script {
+            let commands = scripts.call(
+                self.uuid,
+                script,
+                &self.name,
+                self.kinematic_target
+                    .as_mut()
+                    .unwrap_or(&mut self.transform),
+                self.body.map(|(_, motion)| motion),
+                callback,
+            );
+            if let Some((handle, Motion::Dynamic)) = self.body {
+                physics.apply_commands(handle, &commands);
+            }
+        }
+    }
+}
+
+pub struct Runtime {
+    world: World,
+    objects: QueryState<&'static mut RuntimeObject>,
+    physics: Physics,
+    accumulated: f32,
+    scripts: Option<Scripts>,
+    audio_sources: HashMap<Uuid, AudioSource>,
+    audio_cues: VecDeque<AudioCue>,
+    audio_gain: f32,
+    range: Option<range::Range>,
+    range_input: GameInput,
+}
+
+impl Runtime {
+    pub fn new(scene: &Scene) -> SceneResult<Self> {
+        scene.validate()?;
+        let mut world = World::new();
+        let mut physics = Physics::new();
+        for object in &scene.entities {
+            world.spawn(RuntimeObject {
+                uuid: object.uuid,
+                name: object.name.clone(),
+                transform: object.transform,
+                color: object.color,
+                spin: object.spin,
+                body: object.body.map(|body| {
+                    (
+                        physics.insert(object.uuid, object.transform, body),
+                        body.motion,
+                    )
+                }),
+                kinematic_target: object
+                    .body
+                    .filter(|body| body.motion == Motion::Kinematic)
+                    .map(|_| object.transform),
+                script: object.script,
+            });
+        }
+        let objects = world.query();
+        let audio_cues = scene
+            .entities
+            .iter()
+            .filter_map(|object| {
+                object
+                    .audio_source
+                    .filter(|source| source.start == AudioStart::OnPlay)
+                    .map(|source| AudioCue {
+                        object: object.uuid,
+                        source,
+                    })
+            })
+            .take(MAX_AUDIO_CUES)
+            .collect();
+        let audio_sources = scene
+            .entities
+            .iter()
+            .filter_map(|object| object.audio_source.map(|source| (object.uuid, source)))
+            .collect();
+        let audio_gain = scene
+            .entities
+            .iter()
+            .find_map(|object| object.audio_listener)
+            .map_or(1.0, |listener| listener.volume);
+        Ok(Self {
+            world,
+            objects,
+            physics,
+            accumulated: 0.0,
+            scripts: None,
+            audio_sources,
+            audio_cues,
+            audio_gain,
+            range: scene
+                .training_range
+                .as_ref()
+                .map(|config| range::Range::new(scene, config))
+                .transpose()?,
+            range_input: GameInput::default(),
+        })
+    }
+
+    pub fn start_scripts(&mut self, scene: &Scene, sources: &HashMap<Uuid, String>) {
+        let referenced: HashSet<_> = scene
+            .entities
+            .iter()
+            .filter_map(|object| object.script)
+            .collect();
+        if referenced.is_empty() || self.scripts.is_some() {
+            return;
+        }
+        let mut scripts = Scripts::new();
+        for asset in scene
+            .assets
+            .iter()
+            .filter(|asset| referenced.contains(&asset.id))
+        {
+            scripts.compile(
+                asset.id,
+                &asset.name,
+                scene
+                    .script_sources
+                    .get(&asset.id)
+                    .or_else(|| sources.get(&asset.id))
+                    .map(String::as_str),
+            );
+        }
+        for object in &scene.entities {
+            if let Some(asset) = object.script {
+                scripts.bind(object.uuid, asset, &object.script_fields);
+            }
+        }
+        for mut object in self.objects.iter_mut(&mut self.world) {
+            object.run_script(&mut scripts, &mut self.physics, Callback::Start);
+        }
+        self.scripts = Some(scripts);
+    }
+
+    pub fn game_input(&mut self, input: GameInput) {
+        if self.range.is_some() {
+            self.range_input = input.clone();
+        }
+        if let Some(scripts) = &mut self.scripts {
+            scripts.input = input.into();
+        }
+    }
+
+    pub fn script_log(&self) -> impl DoubleEndedIterator<Item = &str> {
+        self.scripts
+            .iter()
+            .flat_map(|scripts| scripts.log.iter().map(String::as_str))
+    }
+
+    pub fn audio_gain(&self) -> f32 {
+        self.audio_gain
+    }
+
+    pub fn range_status(&self) -> Option<RangeStatus> {
+        self.range.as_ref().map(range::Range::status)
+    }
+
+    pub fn drain_audio(&mut self) -> impl Iterator<Item = AudioCue> + '_ {
+        self.audio_cues.drain(..)
+    }
+
+    pub fn tick(&mut self, seconds: f32) {
+        if !seconds.is_finite() {
+            return;
+        }
+        let frame = seconds.clamp(0.0, 0.1);
+        if let Some(range) = &mut self.range {
+            for object in range.update(frame, &self.range_input).into_iter().flatten() {
+                if let Some(&source) = self.audio_sources.get(&object)
+                    && source.start == AudioStart::Manual
+                    && self.audio_cues.len() < MAX_AUDIO_CUES
+                {
+                    self.audio_cues.push_back(AudioCue { object, source });
+                }
+            }
+        }
+        if self.physics.count() != 0 || self.scripts.is_some() {
+            self.accumulated += frame;
+            let requested = (self.accumulated / STEP) as usize;
+            self.accumulated -= requested as f32 * STEP;
+            for _ in 0..requested.min(MAX_STEPS) {
+                if let Some(scripts) = &mut self.scripts {
+                    for mut object in self.objects.iter_mut(&mut self.world) {
+                        object.run_script(scripts, &mut self.physics, Callback::Fixed(STEP));
+                    }
+                }
+                for mut object in self.objects.iter_mut(&mut self.world) {
+                    let spin = object.spin;
+                    if let Some((body, Motion::Kinematic)) = object.body
+                        && let Some(target) = &mut object.kinematic_target
+                    {
+                        if spin {
+                            target.rotation =
+                                (Quat::from_rotation_y(STEP * 0.7) * target.rotation).normalize();
+                        }
+                        self.physics.move_kinematic(body, *target);
+                    }
+                }
+                if self.physics.count() > 0 {
+                    self.physics.step();
+                    for event in self
+                        .physics
+                        .recent()
+                        .iter()
+                        .filter(|event| event.sensor && event.started)
+                    {
+                        for object in [event.first, event.second] {
+                            if let Some(&source) = self.audio_sources.get(&object)
+                                && source.start == AudioStart::OnTriggerEnter
+                                && self.audio_cues.len() < MAX_AUDIO_CUES
+                            {
+                                self.audio_cues.push_back(AudioCue { object, source });
+                            }
+                        }
+                    }
+                    if let Some(scripts) = &mut self.scripts {
+                        for event in self.physics.recent().to_vec() {
+                            let name = match (event.sensor, event.started) {
+                                (true, true) => "on_trigger_enter",
+                                (true, false) => "on_trigger_exit",
+                                (false, true) => "on_collision_enter",
+                                (false, false) => "on_collision_exit",
+                            };
+                            for mut object in self.objects.iter_mut(&mut self.world) {
+                                if object.uuid == event.first || object.uuid == event.second {
+                                    let other = if object.uuid == event.first {
+                                        event.second
+                                    } else {
+                                        event.first
+                                    };
+                                    if let Some((handle, _)) = object.body {
+                                        self.physics.pose(handle, &mut object.transform);
+                                    }
+                                    object.run_script(
+                                        scripts,
+                                        &mut self.physics,
+                                        Callback::Event(name, other),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let rotation = Quat::from_rotation_y(frame * 0.7);
+        for mut object in self.objects.iter_mut(&mut self.world) {
+            if let Some(pose) = self
+                .range
+                .as_ref()
+                .and_then(|range| range.pose(object.uuid))
+            {
+                object.transform = pose;
+                continue;
+            }
+            if let Some((body, _)) = object.body {
+                self.physics.pose(body, &mut object.transform);
+            } else if object.spin {
+                object.transform.rotation = (rotation * object.transform.rotation).normalize();
+            }
+            if let Some(scripts) = &mut self.scripts {
+                object.run_script(scripts, &mut self.physics, Callback::Update(frame));
+            }
+        }
+    }
+
+    pub fn physics_body_count(&self) -> usize {
+        self.physics.count()
+    }
+
+    pub fn physics_events(&self) -> impl DoubleEndedIterator<Item = &PhysicsEvent> {
+        self.physics.events().iter()
+    }
+
+    pub fn extract(&mut self) -> impl Iterator<Item = (Uuid, Transform, [f32; 3])> + '_ {
+        self.objects
+            .iter(&self.world)
+            .map(|object| (object.uuid, object.transform, object.color))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_script_fields_and_state_are_per_object_and_drive_kinematics() {
+        let mut scene = Scene::default();
+        let script = Uuid::new_v4();
+        scene.assets.push(Asset {
+            id: script,
+            name: "Controller".into(),
+            kind: AssetKind::Script,
+        });
+        scene.script_sources.insert(script, r#"
+            fn fields() { #{ speed: 2, enabled: true, greeting: "ready" } }
+            fn on_start(entity) {
+                this.steps = 0;
+                log(param("greeting"));
+            }
+            fn on_update(entity, dt) {
+                if param("enabled") && key_down("Space") {
+                    this.steps += 1;
+                    let position = get_position(entity);
+                    set_position(entity, position.x + this.steps.to_float() * param("speed"), position.y, position.z);
+                }
+            }
+        "#.into());
+        scene.entities[0].script = Some(script);
+        scene.entities[0]
+            .script_fields
+            .insert("speed".into(), ScriptValue::Number(0.5));
+        let mut second = Object::cube("Kinematic".into(), Vec3::X * 10.0);
+        second.script = Some(script);
+        second.spin = false;
+        second.body = Some(Body {
+            motion: Motion::Kinematic,
+            ..Default::default()
+        });
+        scene.entities.push(second);
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("controller.ron");
+        scene.save(&path).unwrap();
+        let reloaded = Scene::load(&path).unwrap();
+        assert_eq!(reloaded, scene);
+        let mut runtime = Runtime::new(&reloaded).unwrap();
+        runtime.start_scripts(&reloaded, &HashMap::new());
+        runtime.game_input(GameInput {
+            held: vec!["Space"],
+            ..Default::default()
+        });
+        runtime.tick(STEP);
+        runtime.tick(STEP);
+        runtime.game_input(GameInput::default());
+        runtime.tick(STEP);
+        let poses: HashMap<_, _> = runtime
+            .extract()
+            .map(|(id, transform, _)| (id, transform.translation.x))
+            .collect();
+        assert!((poses[&scene.entities[0].uuid] - 1.5).abs() < 1e-4);
+        assert!((poses[&scene.entities[1].uuid] - 16.0).abs() < 1e-4);
+        assert_eq!(runtime.script_log().count(), 2);
+        assert_eq!(scene.entities[1].transform.translation.x, 10.0);
+    }
+
+    #[test]
+    fn dynamic_scripts_drive_velocity_and_impulse_through_physics() {
+        let mut scene = Scene::default();
+        let script = Uuid::new_v4();
+        scene.assets.push(Asset {
+            id: script,
+            name: "Launch".into(),
+            kind: AssetKind::Script,
+        });
+        scene.script_sources.insert(
+            script,
+            r#"
+            fn on_start(entity) {
+                set_velocity(entity, 2, 0, 0);
+                add_impulse(entity, 1, 0, 0);
+            }
+        "#
+            .into(),
+        );
+        scene.entities[0].script = Some(script);
+        scene.entities[0].body = Some(Body {
+            gravity_scale: 0.0,
+            ..Default::default()
+        });
+        let mut runtime = Runtime::new(&scene).unwrap();
+        runtime.start_scripts(&scene, &HashMap::new());
+        for _ in 0..30 {
+            runtime.tick(STEP);
+        }
+        assert!(runtime.script_log().next().is_none());
+        let position = runtime.extract().next().unwrap().1.translation;
+        assert!((position.x - 1.5).abs() < 0.02, "{position:?}");
+    }
+
+    #[test]
+    fn startup_audio_and_listener_are_scene_data() {
+        let mut scene = Scene::default();
+        let clip = Uuid::new_v4();
+        scene.assets.push(Asset {
+            id: clip,
+            name: "Chime".into(),
+            kind: AssetKind::Wav,
+        });
+        scene.entities[0].audio_source = Some(AudioSource::new(clip));
+        scene.entities[0].audio_listener = Some(AudioListener { volume: 0.4 });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sound.ron");
+        scene.save(&path).unwrap();
+        let loaded = Scene::load(&path).unwrap();
+        assert_eq!(loaded, scene);
+        let mut runtime = Runtime::new(&loaded).unwrap();
+        assert_eq!(runtime.audio_gain(), 0.4);
+        assert_eq!(
+            runtime.drain_audio().collect::<Vec<_>>(),
+            [AudioCue {
+                object: scene.entities[0].uuid,
+                source: AudioSource::new(clip),
+            }]
+        );
+        runtime.tick(STEP);
+        assert!(runtime.drain_audio().next().is_none());
+    }
+
+    #[test]
+    fn rhai_start_and_wasd_move_only_the_runtime_copy() {
+        let mut scene = Scene::default();
+        let id = Uuid::new_v4();
+        scene.assets.push(Asset {
+            id,
+            name: "Move".into(),
+            kind: AssetKind::Script,
+        });
+        scene.entities[0].script = Some(id);
+        scene.entities[0].spin = false;
+        let sources = HashMap::from([(
+            id,
+            include_str!("../../../examples/script-playground/Move.rhai").into(),
+        )]);
+        let mut runtime = Runtime::new(&scene).unwrap();
+        runtime.start_scripts(&scene, &sources);
+        runtime.start_scripts(&scene, &sources);
+        runtime.game_input(GameInput {
+            forward: true,
+            ..Default::default()
+        });
+        for _ in 0..60 {
+            runtime.tick(STEP);
+        }
+        assert_eq!(runtime.script_log().count(), 1);
+        assert!(runtime.script_log().next().unwrap().contains("Ready"));
+        let transform = runtime.extract().next().unwrap().1;
+        assert!((transform.translation.z + 2.4).abs() < 1e-4);
+        assert_eq!(scene.entities[0].transform.translation.z, 0.0);
+    }
+
+    #[test]
+    fn runaway_rhai_callback_discards_queued_transform_and_disables_instance() {
+        let mut scene = Scene::default();
+        let id = Uuid::new_v4();
+        scene.assets.push(Asset {
+            id,
+            name: "Runaway".into(),
+            kind: AssetKind::Script,
+        });
+        scene.entities[0].script = Some(id);
+        scene.entities[0].spin = false;
+        let mut runtime = Runtime::new(&scene).unwrap();
+        runtime.start_scripts(
+            &scene,
+            &HashMap::from([(
+                id,
+                r#"
+            fn on_update(entity, dt) {
+                translate_local(entity, 1.0, 0.0, 0.0);
+                loop { }
+            }
+        "#
+                .into(),
+            )]),
+        );
+        runtime.tick(STEP);
+        runtime.tick(STEP);
+        let message = runtime
+            .script_log()
+            .next()
+            .expect("the runaway callback must log an error");
+        assert!(
+            message.contains("Runaway.rhai") && message.contains("on_update"),
+            "{message}"
+        );
+        assert_eq!(runtime.script_log().count(), 1);
+        assert_eq!(
+            runtime.extract().next().unwrap().1,
+            scene.entities[0].transform
+        );
+    }
+
+    #[test]
+    fn dynamic_box_crosses_sensor_and_lands_on_fixed_floor() {
+        let mut scene = Scene::default();
+        let dropped = &mut scene.entities[0];
+        dropped.transform.translation.y = 3.0;
+        dropped.body = Some(Body::default());
+        let dropped_id = dropped.uuid;
+
+        let mut floor = Object::cube("Floor".into(), Vec3::Y * -0.25);
+        floor.transform.scale = Vec3::new(6.0, 0.5, 6.0);
+        floor.body = Some(Body {
+            motion: Motion::Fixed,
+            ..Default::default()
+        });
+        let floor_id = floor.uuid;
+        scene.entities.push(floor);
+
+        let mut sensor = Object::cube("Sensor".into(), Vec3::Y * 1.5);
+        sensor.body = Some(Body {
+            motion: Motion::Fixed,
+            size: Vec3::new(2.0, 0.2, 2.0),
+            sensor: true,
+            ..Default::default()
+        });
+        let sensor_id = sensor.uuid;
+        let clip = Uuid::new_v4();
+        let source = AudioSource {
+            start: AudioStart::OnTriggerEnter,
+            ..AudioSource::new(clip)
+        };
+        sensor.audio_source = Some(source);
+        scene.assets.push(Asset {
+            id: clip,
+            name: "Sensor chime".into(),
+            kind: AssetKind::Ogg,
+        });
+        scene.entities.push(sensor);
+
+        let before = scene.clone();
+        let mut runtime = Runtime::new(&scene).unwrap();
+        for _ in 0..180 {
+            runtime.tick(STEP);
+        }
+        let (floor_transform, _) = runtime
+            .extract()
+            .find(|&(id, _, _)| id == floor_id)
+            .map(|(_, transform, color)| (transform, color))
+            .unwrap();
+        assert_eq!(floor_transform.rotation, Quat::IDENTITY);
+        let (_, dropped_transform, _) = runtime
+            .extract()
+            .find(|&(id, _, _)| id == dropped_id)
+            .unwrap();
+        assert!((dropped_transform.translation.y - 0.5).abs() < 0.025);
+        let trigger_events: Vec<_> = runtime
+            .physics_events()
+            .filter(|event| event.sensor && event.first == sensor_id && event.second == dropped_id)
+            .map(|event| event.started)
+            .collect();
+        assert_eq!(trigger_events, [true, false]);
+        assert_eq!(
+            runtime.drain_audio().collect::<Vec<_>>(),
+            [AudioCue {
+                object: sensor_id,
+                source
+            }]
+        );
+        assert!(
+            runtime
+                .physics_events()
+                .any(|event| !event.sensor && event.started)
+        );
+        assert_eq!(scene, before);
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("physics.ron");
+        scene.save(&path).unwrap();
+        assert_eq!(Scene::load(&path).unwrap(), scene);
+    }
+
+    #[test]
+    fn physics_caps_catchup_and_drives_kinematic_rotation() {
+        let mut scene = Scene::default();
+        scene.entities[0].body = Some(Body {
+            motion: Motion::Kinematic,
+            ..Default::default()
+        });
+        let mut runtime = Runtime::new(&scene).unwrap();
+        runtime.tick(1.0);
+        let (_, transform, _) = runtime.extract().next().unwrap();
+        let expected = Quat::from_rotation_y((MAX_STEPS as f32) * STEP * 0.7);
+        assert!(
+            transform.rotation.abs_diff_eq(expected, 1e-4),
+            "{transform:?}"
+        );
+        let previous = transform.rotation;
+        runtime.tick(0.0);
+        assert_eq!(runtime.extract().next().unwrap().1.rotation, previous);
+    }
+
+    #[test]
+    fn hierarchy_uses_parent_matrices_and_rejects_cycles_and_missing_parents() {
+        let mut scene = Scene::default();
+        let parent = scene.entities[0].uuid;
+        scene.entities[0].transform.translation = Vec3::X * 4.0;
+        scene.entities[0].transform.scale = Vec3::splat(2.0);
+        let mut child = Object::cube("Child".into(), Vec3::Y);
+        child.parent = Some(parent);
+        scene.entities.insert(0, child);
+        let world = scene
+            .hierarchy()
+            .unwrap()
+            .world_matrices(|index| scene.entities[index].transform.matrix());
+        assert_eq!(world[0].w_axis.truncate(), Vec3::new(4.0, 2.0, 0.0));
+        scene.entities[1].parent = Some(scene.entities[0].uuid);
+        assert!(scene.validate().unwrap_err().to_string().contains("cycle"));
+        scene.entities.remove(1);
+        assert!(
+            scene
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("Missing parent")
+        );
+    }
+
+    #[test]
+    fn opens_initial_scene_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.ron");
+        let object = Uuid::new_v4();
+        let transform = ron::to_string(&Transform::default()).unwrap();
+        fs::write(&path, format!(
+            r#"(format_version:1,scene_uuid:"{}",name:"Old",entities:[(uuid:"{object}",name:"Cube",transform:{transform},color:(1.0,1.0,1.0),spin:true)])"#,
+            Uuid::new_v4()
+        )).unwrap();
+        let scene = Scene::load(&path).unwrap();
+        assert_eq!(scene.format_version, FORMAT_VERSION);
+        assert!(!scene.sky);
+        assert_eq!(scene.entities[0].uuid, object);
+        assert_eq!(scene.entities[0].primitive, Primitive::Cube);
+        assert!(scene.assets.is_empty() && scene.entities[0].parent.is_none());
+    }
+
+    #[test]
+    fn save_load_and_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.futty.scene.ron");
+        let mut scene = Scene::default();
+        assert!(scene.sky);
+        scene.save(&path).unwrap();
+        assert_eq!(Scene::load(&path).unwrap(), scene);
+        scene.entities[0].transform.translation.x = 2.0;
+        scene.sky = false;
+        scene.save(&path).unwrap();
+        assert_eq!(Scene::load(&path).unwrap(), scene);
+        scene.entities.push(scene.entities[0].clone());
+        assert!(scene.save(&path).is_err());
+        assert_eq!(Scene::load(&path).unwrap().entities.len(), 1);
+    }
+
+    #[test]
+    fn shared_materials_round_trip_and_validate_before_replacing_a_scene() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("materials.ron");
+        let mut scene = Scene::default();
+        let id = Uuid::new_v4();
+        scene.materials.insert(
+            id,
+            Material {
+                name: "Copper".into(),
+                color: [0.7, 0.3, 0.1],
+                surface: Surface {
+                    roughness: 0.2,
+                    emission: [1.0, 0.0, 0.0],
+                    emission_strength: 2.0,
+                },
+                ..Default::default()
+            },
+        );
+        scene.entities[0].material = Some(id);
+        scene.save(&path).unwrap();
+        assert_eq!(Scene::load(&path).unwrap(), scene);
+        let saved = fs::read(&path).unwrap();
+        for roughness in [f32::NAN, -0.1, 1.1] {
+            scene.materials.get_mut(&id).unwrap().surface.roughness = roughness;
+            assert!(scene.save(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), saved);
+        }
+        scene.materials.get_mut(&id).unwrap().surface.roughness = 0.5;
+        scene.materials.get_mut(&id).unwrap().texture = Some(Uuid::new_v4());
+        assert!(scene.validate().is_err());
+        scene.materials.clear();
+        assert!(
+            scene
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("Missing material")
+        );
+    }
+
+    #[test]
+    fn sprite_scene_preserves_settings_and_validates_texture_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sprite.futty.scene.ron");
+        let mut scene = Scene::default();
+        let texture = Uuid::new_v4();
+        let sprite = Sprite {
+            texture,
+            size: glam::Vec2::new(2.0, 1.0),
+            billboard: Billboard::Upright,
+        };
+        scene.entities[0].sprite = Some(sprite);
+        assert!(scene.save(&path).is_err());
+        scene.assets.push(Asset {
+            id: texture,
+            name: "Sprite".into(),
+            kind: AssetKind::Texture,
+        });
+        scene.save(&path).unwrap();
+        assert_eq!(Scene::load(&path).unwrap().entities[0].sprite, Some(sprite));
+        scene.entities[0].sprite.as_mut().unwrap().size.x = 0.0;
+        assert!(scene.save(&path).is_err());
+    }
+
+    #[test]
+    fn built_in_shapes_survive_save_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shapes.futty.scene.ron");
+        let scene = Scene {
+            entities: Primitive::ALL
+                .into_iter()
+                .map(|shape| Object {
+                    primitive: shape,
+                    ..Object::cube(shape.label().into(), Vec3::ZERO)
+                })
+                .collect(),
+            ..Scene::default()
+        };
+        scene.save(&path).unwrap();
+        assert_eq!(Scene::load(&path).unwrap(), scene);
+    }
+
+    #[test]
+    fn scene_persists_main_camera_and_validates_camera_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cameras.futty.scene.ron");
+        let mut scene = Scene::default();
+        let mut a = Object::cube("Camera A".into(), Vec3::ZERO);
+        a.camera = Some(CameraLens::default());
+        let mut b = Object::cube("Camera B".into(), Vec3::Y);
+        b.camera = Some(CameraLens {
+            projection: futty_core::Projection::Orthographic,
+            size: 3.0,
+            ..Default::default()
+        });
+        let (a_id, b_id) = (a.uuid, b.uuid);
+        scene.entities.extend([a, b]);
+        scene.main_camera = Some(b_id);
+        scene.save(&path).unwrap();
+        let loaded = Scene::load(&path).unwrap();
+        assert_eq!(loaded, scene);
+        assert_eq!(loaded.camera_index(None), Some(2));
+        assert_eq!(loaded.camera_index(Some(a_id)), Some(1));
+        scene.entities[2].camera.as_mut().unwrap().far = 0.01;
+        assert!(scene.save(&path).is_err());
+        scene.entities[2].camera = None;
+        assert!(scene.save(&path).is_err());
+    }
+
+    #[test]
+    fn scene_preserves_light_parameters_and_rejects_invalid_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lights.futty.scene.ron");
+        let mut scene = Scene::default();
+        let mut object = Object::cube("Lamp".into(), Vec3::Y);
+        object.light = Some(Light {
+            color: [0.1, 0.5, 1.0],
+            range: 6.25,
+            ..Light::new(futty_core::LightKind::Point)
+        });
+        scene.entities.push(object);
+        scene.save(&path).unwrap();
+        assert_eq!(Scene::load(&path).unwrap(), scene);
+        scene.entities[1].light.as_mut().unwrap().intensity = -1.0;
+        assert!(scene.save(&path).is_err());
+    }
+
+    #[test]
+    fn directional_shadows_round_trip_and_older_lights_default_to_unshadowed() {
+        let old: Light =
+            ron::from_str("(kind:Directional,color:(1.0,1.0,1.0),intensity:0.75,range:8.0)")
+                .unwrap();
+        assert!(!old.cast_shadows && old.valid());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shadows.futty.scene.ron");
+        let mut scene = Scene::default();
+        let mut light = Object::cube("Sun".into(), Vec3::Y);
+        light.light = Some(Light {
+            shadow_distance: 42.0,
+            ..Light::new(futty_core::LightKind::Directional)
+        });
+        scene.entities.push(light);
+        scene.save(&path).unwrap();
+        assert_eq!(Scene::load(&path).unwrap(), scene);
+        scene.entities[1].light.as_mut().unwrap().shadow_distance = 0.0;
+        assert!(scene.save(&path).is_err());
+    }
+
+    #[test]
+    fn play_world_preserves_edit_world() {
+        let scene = Scene::default();
+        for _ in 0..100 {
+            let mut runtime = Runtime::new(&scene).unwrap();
+            let object = &scene.entities[0];
+            assert_eq!(runtime.extract().next().unwrap().1, object.transform);
+            runtime.tick(1.0 / 60.0);
+            let (id, transform, _) = runtime.extract().next().unwrap();
+            assert_eq!(id, object.uuid);
+            assert_ne!(transform.rotation, object.transform.rotation);
+            assert_eq!(object.transform.rotation, Quat::IDENTITY);
+        }
+    }
+}
+mod physics;

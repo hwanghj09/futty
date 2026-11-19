@@ -1,0 +1,13 @@
+[package]
+name = "futty-assets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+futty-core.workspace = true
+glam.workspace = true
+gltf = { version = "1.4.1", default-features = false, features = ["utils"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+tempfile = "3"
+bytemuck = { version = "1", features = ["derive"] }

@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/futty-assets", "crates/futty-audio", "crates/futty-core", "crates/futty-editor", "crates/futty-mcp", "crates/futty-render", "crates/futty-runtime"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+
+[workspace.dependencies]
+glam = { version = "0.33", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl"] }
+futty-core = { path = "crates/futty-core" }
+futty-assets = { path = "crates/futty-assets" }
+futty-audio = { path = "crates/futty-audio" }
+futty-render = { path = "crates/futty-render" }
+futty-runtime = { path = "crates/futty-runtime" }

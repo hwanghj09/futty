@@ -1,0 +1,17 @@
+[package]
+name = "futty-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+futty-assets.workspace = true
+futty-core.workspace = true
+glam.workspace = true
+wgpu.workspace = true
+uuid.workspace = true
+bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+pollster = "1"
+wgpu = { workspace = true, features = ["vulkan", "dx12"] }

@@ -1,0 +1,77 @@
+(
+    format_version: 17,
+    scene_uuid: "aa98a9de-4280-4b63-aad0-8ba94acc974b",
+    name: "Range Lobby",
+    entities: [
+        (
+            uuid: "5a9e514a-8ec5-43eb-aa10-308670328785",
+            name: "Lobby Camera",
+            transform: (
+                translation: (0.0, 2.8, 8.7),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            color: (0.42, 0.42, 0.42),
+            spin: false,
+            camera: Some((
+                projection: Perspective,
+                fov: 68.0,
+                size: 5.0,
+                near: 0.05,
+                far: 130.0,
+            )),
+            script: Some("1135db1c-ac44-4ef9-b7df-eb855d1c46b9"),
+        ),
+        (
+            uuid: "c7c4cb2a-df89-4fe7-91c8-746d3dde4a3c",
+            name: "Courtyard",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            color: (0.65, 0.75, 0.83),
+            spin: false,
+            mesh: Some("9a84ad50-0389-47c8-b53c-30205aa30603"),
+        ),
+    ],
+    assets: [
+        (id: "9a84ad50-0389-47c8-b53c-30205aa30603", name: "Courtyard", kind: Model),
+        (id: "1135db1c-ac44-4ef9-b7df-eb855d1c46b9", name: "Lobby", kind: Script),
+    ],
+    script_sources: {
+        "1135db1c-ac44-4ef9-b7df-eb855d1c46b9": r#"
+fn on_update(entity, dt) {
+    if hud_pressed("enter_range") || input_pressed("Interact") {
+        load_scene("Pulse Range");
+    }
+}
+"#,
+    },
+    main_camera: Some("5a9e514a-8ec5-43eb-aa10-308670328785"),
+    sky: true,
+    hud: [
+        (
+            id: "02b391f7-b3a8-484d-82c8-175d479e4019",
+            kind: Text,
+            label: "PULSE RANGE",
+            binding: "",
+            anchor: Center,
+            offset: (0.0, -63.0),
+            size: (320.0, 58.0),
+            color: (108, 239, 206),
+            text_size: 33.0,
+        ),
+        (
+            id: "21e19d87-4e0d-4062-a20d-2244aa7bdf84",
+            kind: Button,
+            label: "Enter practice range",
+            binding: "enter_range",
+            anchor: Center,
+            offset: (0.0, 8.0),
+            size: (272.0, 49.0),
+            color: (108, 239, 206),
+            text_size: 20.0,
+        ),
+    ],
+)

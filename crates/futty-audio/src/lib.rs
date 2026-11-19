@@ -131,6 +131,16 @@ impl Audio {
         self.unavailable = None;
     }
 
+    pub fn stop_object(&mut self, object: Uuid) {
+        self.voices.retain_mut(|(owner, voice)| {
+            if *owner != object {
+                return true;
+            }
+            voice.stop(Tween::default());
+            false
+        });
+    }
+
     fn sound(
         &self,
         id: Uuid,

@@ -40,7 +40,25 @@ cargo run --locked -p futty-editor
 2. [Workshop Grid.png](../examples/asset-preview/Workshop%20Grid.png)를 가져옵니다. 큐브나 UV가 있는 모델을 선택하고 Project에서 PNG를 우클릭해 **Apply to Selection**을 누릅니다. Inspector에서 **Default material**로 되돌릴 수 있습니다.
 3. 씬을 저장하면 에셋 원본을 씬과 같은 폴더의 `Assets/Futty/`에 UUID 이름으로 복사합니다. 다른 위치로 옮길 때는 씬 RON과 해당 폴더를 함께 옮깁니다. **Save Scene As…**는 새 위치에 필요한 에셋을 복사합니다.
 
-씬 포맷 v15는 FPS 연습장 설정을 지원합니다. v1~v14 씬도 열 수 있습니다. 누락된 모델은 뷰포트에서 회색 대체 큐브로, Project 목록에서 오류 문구로 표시합니다.
+씬 포맷 v19부터 프리팹 링크와 인스턴스 오버라이드를 저장합니다. v1~v18 씬도 열 수 있습니다. 누락된 모델은 뷰포트에서 회색 대체 큐브로, Project 목록에서 오류 문구로 표시합니다.
+
+### GLB 재가져오기
+
+Blender에서 변경한 모델을 GLB로 내보낸 뒤 **Project → 기존 GLB 우클릭 → Reimport GLB…**로 교체 파일을 고릅니다. 모델의 UUID와 표시 이름, 배치된 오브젝트와 프리팹의 연결을 유지합니다. 같은 에셋 폴더를 쓰는 씬은 다시 열 때 새 모델을 읽습니다.
+
+저장된 GLB는 교체 즉시 디스크에 반영됩니다. 씬의 Undo는 오브젝트 편집에 적용되며 이전 GLB 파일로 돌아가려면 그 파일을 다시 가져옵니다. 시작 클립에 사용하는 번호는 교체한 GLB에도 있어야 합니다. Rhai에서 클립 번호를 사용한다면 내보내기 전에 클립 순서도 확인합니다.
+
+## GLB 애니메이션
+
+1. 스켈레톤과 클립이 들어 있는 GLB를 **Project → Import…**로 가져옵니다.
+2. 모델을 선택하고 **Inspector → Mesh Renderer → Animation**에서 **Start clip**을 고릅니다. **Bind pose**를 선택하면 기본 자세로 시작합니다.
+3. **Preview** 또는 시간 슬라이더를 써서 Scene과 Game 뷰에서 자세를 확인합니다. **Loop**와 **Speed**는 씬에 저장되며 Play와 Windows 게임에 반영됩니다.
+
+게임 중에는 오브젝트에 붙인 Rhai 스크립트의 이벤트 콜백에서 `play_animation(entity, 2, false)`로 클립을 처음부터 재생할 수 있습니다. 인스펙터에 표시된 GLB 클립 번호를 사용합니다. 반복을 끄면 마지막 프레임을 유지합니다.
+
+[Beacon Bot 예제](../examples/animation-playground/Beacon%20Bot.futty.scene.ron)의 **Idle**, **Walk**, **Signal** 버튼으로 클립을 바꿔볼 수 있습니다. 이 예제의 Walk는 제자리에서 재생되며, 게임 안에서의 이동은 캐릭터 컨트롤러나 스크립트로 조종합니다.
+
+GLB의 이동·회전·스케일 채널과 Linear·Step·Cubic Spline 보간을 지원합니다. 스킨은 최대 256개 관절과 정점당 4개 가중치를 사용합니다. 모프 타깃과 클립 간 블렌딩은 후속 범위입니다. [glTF 2.0 스킨과 애니메이션 규격](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#animations)
 
 ## 공유 머티리얼
 
@@ -51,13 +69,18 @@ cargo run --locked -p futty-editor
 
 머티리얼은 씬과 함께 저장되며 Undo/Redo, Play와 Windows 내보내기에 반영됩니다. Roughness는 광택의 넓이와 강도를 조절하는 간단한 Blinn–Phong 모델입니다. 발광은 표면 자체의 밝기에 반영되며 주변을 비추거나 블룸을 만들지는 않습니다. 공유 재질은 불투명 3D 메시용이고 Sprite3D는 기존 Tint와 투명도를 사용합니다.
 
-## 프리팹
+## 연결형 프리팹
 
 1. Hierarchy에서 루트로 삼을 오브젝트 하나를 선택하고 우클릭 → **Create Prefab**을 누릅니다. 자식 계층과 기본 도형·모델, Sprite3D, 카메라·조명, 물리·스크립트·오디오, 공유 머티리얼 연결을 함께 저장합니다. Project 빈 공간의 **Create Prefab from Selection**에서도 만들 수 있습니다.
 2. Project의 **PREFAB** 항목을 클릭하면 기존 Inspector에서 이름과 저장된 계층을 확인합니다. **Place in Scene**, 항목 더블클릭, 우클릭 → **Place in Scene**으로 반복 배치합니다. 새 계층은 기존 오브젝트 옆의 바닥에 배치되며 루트가 선택됩니다. **G / R / S**로 전체 계층을 조절합니다.
-3. 생성과 한 번의 배치는 각각 Undo 한 번으로 되돌릴 수 있습니다. 프리팹은 씬에 포함되어 저장·복원되고, 프리팹이 참조하는 에셋과 재질도 삭제로부터 보호합니다. **Remove Prefab**은 Project의 저장된 틀을 지우며 이미 배치된 오브젝트는 유지합니다.
+3. 프리팹의 **Edit Source**로 원본을 선택합니다. 원본을 편집하면 같은 씬의 연결된 인스턴스가 갱신됩니다. 변경과 전파는 Undo 한 번으로 되돌릴 수 있습니다.
+4. 인스턴스에서 위치, 회전, 크기, 머티리얼, 텍스처 또는 색을 바꾸면 해당 항목이 오버라이드로 저장됩니다. **Reset Overrides**는 선택한 오브젝트의 값을 원본과 다시 연결합니다. 인스턴스 루트의 배치 위치와 부모는 그대로 사용합니다.
 
-현재 프리팹은 씬 안에 저장되는 독립 복제 방식입니다. 배치 후 수정한 오브젝트에서 새 프리팹을 만들 수 있으며, 원본 수정의 자동 전파와 씬 사이 프리팹 파일 공유는 후속 범위입니다. 공유 머티리얼의 수정은 기존 방식대로 반영됩니다. 기존 오디오 리스너가 있으면 새 배치에서는 중복 리스너를 제외합니다. Windows 게임에는 배치된 오브젝트와 필요한 에셋이 포함됩니다.
+원본에 추가한 자식은 인스턴스에도 추가됩니다. 원본에서 자식을 제거하면 해당 복제본도 정리됩니다. 그 복제본에 개별 수정이나 따로 붙인 오브젝트가 있으면 씬에 보존됩니다. 인스턴스의 자식을 직접 삭제하거나 다른 부모로 옮기면 그 인스턴스를 연결 해제합니다. **Unpack**으로 수동으로 연결을 해제할 수도 있습니다.
+
+**Remove Prefab**은 저장된 프리팹을 지우고 배치된 오브젝트를 일반 오브젝트로 유지합니다. 원본이 사라진 프리팹은 마지막으로 저장한 내용으로 배치할 수 있습니다. v18까지 만들어 둔 독립 복제본은 기존 상태로 열립니다. Windows 빌드는 적용된 인스턴스와 에셋을 포함합니다.
+
+[Prefab Workshop 예제](../examples/prefab-playground/Prefab%20Workshop.futty.scene.ron)에서 왼쪽 **Signal Tower → Beacon**의 **Position Y**를 바꿔 보세요. 가운데 탑은 새 위치를 따르고, 오른쪽 탑은 높이와 주황색 재질 오버라이드를 유지합니다.
 
 ## 게임 카메라
 
@@ -90,6 +113,19 @@ codex mcp add futty -- "$workspace\target\debug\futty-mcp.exe" "$workspace"
 
 움직이는 드론을 상대로 45초 동안 점수를 쌓는 FPS 연습장입니다. [Pulse Range 씬](../examples/pulse-range/Pulse%20Range.futty.scene.ron)을 열고 **Play**를 누릅니다. 단독 실행과 모델링 원본은 [Pulse Range 문서](../examples/pulse-range/README.md)에 있습니다.
 
+## 게임 HUD
+
+**Window → Game HUD**를 열고 **+ Add widget**에서 Text, Image, Button, Gauge를 추가합니다. 게임 화면에서 배치를 보면서 앵커, 위치, 크기, 색상을 조절합니다. 오른쪽과 아래쪽 앵커에서 양수 오프셋은 화면 안쪽을 향합니다. 겹치는 위젯의 표시 순서는 **Earlier**와 **Later**로 바꿉니다.
+
+- **Text**는 입력한 문구 또는 **Value binding**에 연결한 값을 표시합니다.
+- **Image**는 Project에 임포트한 PNG를 사용하고 원본 비율을 유지합니다.
+- **Gauge**는 연결된 숫자를 0~1 범위의 막대로 표시합니다.
+- **Button**에 **Button action**을 지정하면 Play 중 해당 버튼을 클릭한 프레임에 Rhai의 `hud_pressed("charge")`로 입력을 읽을 수 있습니다. FPS 화면에서 마우스를 사용 중이면 **Esc**로 먼저 풀어 줍니다.
+
+스크립트에서 `set_hud("energy", 0.5)`를 호출하고 Text 또는 Gauge의 **Value binding**을 `energy`로 지정합니다. Pulse Range의 내장 값은 `range.score`, `range.time`, `range.time_fraction`, `range.ammo`, `range.streak`입니다. 연속 명중 표시처럼 값이 있을 때만 나타나는 Text는 Label을 비워 둡니다.
+
+HUD 배치는 씬 파일에 저장되며 Play와 Windows 내보내기에도 적용됩니다.
+
 ## 조명
 
 - **Scene 우클릭 → Add Object → Light** 또는 **Hierarchy → + Add → Light**에서 조명을 추가합니다.
@@ -111,6 +147,9 @@ codex mcp add futty -- "$workspace\target\debug\futty-mcp.exe" "$workspace"
 
 물리는 Play 중 60 Hz로 실행됩니다. **Stop**을 누르면 편집 씬의 위치와 회전으로 돌아갑니다. 현재 충돌체는 씬 루트에 있는 오브젝트의 상자 형태를 지원합니다.
 
+- 씬 루트의 카메라나 오브젝트에 **Physics → Character controller**를 켜면 캡슐로 벽과 바닥에 충돌하며 이동합니다. **WASD**로 이동하고 **Space**로 점프합니다. `Origin above feet`는 바닥에서 오브젝트 원점까지의 높이입니다. 같은 오브젝트에는 강체와 캐릭터 컨트롤러 중 하나를 사용합니다.
+- 강체의 **Collision layer**는 1–32이며 **Collision mask**의 최하위 비트가 레이어 1입니다. `FFFFFFFF`는 모든 레이어를 선택합니다. 캐릭터는 마스크에 포함된 고체 충돌체를 통과할 수 없습니다. Pulse Range의 발사는 가장 가까운 고체에서 막힙니다.
+
 ## Rhai 스크립트
 
 1. 오브젝트를 선택하고 **Inspector → Script → New script**를 누르거나 Project 빈 공간을 우클릭해 **New Script**를 누릅니다.
@@ -123,26 +162,43 @@ fn fields() {
 }
 
 fn on_update(entity, dt) {
-    if key_down("D") {
+    if input_down("MoveRight") {
         translate(entity, param("speed") * dt, 0, 0);
     }
 }
 ```
 
 - `fields()`의 숫자·불리언·텍스트는 Inspector에서 오브젝트별로 조절합니다. `param("speed")`로 값을 읽고, `this.counter` 같은 상태는 오브젝트마다 이번 Play 동안 유지합니다.
-- 입력은 `key_down("Space")`처럼 실제 키 이름으로 읽습니다. 기존 `input_down("MoveForward")`도 사용할 수 있습니다.
+- **Window → Game Controls** 또는 **F10**에서 키·마우스 버튼과 감도를 바꿀 수 있습니다. 단독 실행에서도 **F10**으로 열 수 있습니다. 설정은 에디터와 단독 실행 앱의 사용자 설정에 각각 저장됩니다.
+- Rhai에서 `input_down("MoveForward")`, `input_pressed("Fire")`, `input_released("Fire")`로 입력을 읽습니다. `MoveForward`, `MoveBackward`, `MoveLeft`, `MoveRight`, `Jump`, `Fire`, `Reload`, `Interact`, `Retry`를 지원합니다. 직접 키를 읽는 `key_down("Space")`와 감도를 반영한 `mouse_delta_x()`·`mouse_delta_y()`도 사용할 수 있습니다.
+- **Inspector → Tags**에 `door` 같은 태그를 입력합니다. `find_tag("door")`는 첫 번째 오브젝트를, `find_all_tagged("door")`는 해당 태그의 오브젝트 목록을 반환합니다. 대상이 없으면 각각 `()`와 빈 배열을 반환합니다.
+- `send_event(target, "open")`은 대상 스크립트의 `on_message(entity, sender, name)`을 다음 틱에서 호출합니다. 예를 들어 `input_pressed("Interact")`일 때 스위치가 문에 `open` 이벤트를 보낼 수 있습니다.
+- `spawn_prefab("Crate", 2, 0, 0)`은 다음 틱에서 프리팹 계층을 생성하며 루트 핸들을 반환합니다. `despawn(root)`으로 생성한 계층 전체를 제거합니다. Play 중 생성·제거는 저장한 편집 씬과 분리되어 실행됩니다.
 - 좌표는 부모 기준입니다. `get_position`, `set_position`, `translate`, `translate_local`, `rotate`, `rotate_y`를 사용할 수 있습니다. 이동·회전은 강체 없는 오브젝트와 Kinematic 강체에서, 크기 변경 `set_scale`은 강체 없는 오브젝트에서 지원합니다. Dynamic 강체는 월드 기준 `set_velocity`와 `add_impulse`로 조종합니다. 회전 단위는 도입니다.
 - 라이프사이클은 `on_start(entity)`, `on_update(entity, dt)`, `on_fixed_update(entity, dt)`, `on_collision_enter/exit(entity, other)`, `on_trigger_enter/exit(entity, other)`를 지원합니다. 스크립트는 자신이 붙은 오브젝트를 조종합니다. 오류가 난 인스턴스는 이번 Play에서 중지합니다.
 - 편집기에서 적용한 코드는 **Save Scene**으로 씬 파일에 저장합니다. 기존 `.rhai`는 **Project → Import…**로 가져온 뒤 에셋을 우클릭해 **Attach to Selection**으로 연결합니다. 가져온 스크립트를 편집기로 수정하면 씬에 편집한 소스가 저장됩니다.
+
+## 프로젝트와 씬 전환
+
+1. 씬을 저장한 뒤 **File → Project → New Project from Current Scene…**을 선택합니다. `.futty.project.ron`은 함께 묶을 씬의 상위 폴더에 저장합니다.
+2. **Add Scene…**으로 프로젝트 폴더 안의 다른 씬을 등록합니다. **Start Scene**에서 프로젝트를 열거나 단독으로 실행할 때 처음 보여 줄 씬을 고릅니다. **Edit Scene**에서 편집할 파일을 전환합니다.
+3. 게임에서는 Rhai의 `load_scene("Pulse Range")`처럼 등록된 씬 ID를 넘겨 전환합니다. 에디터에서 등록할 때 ID는 씬 파일 이름의 확장자를 뺀 값입니다. 전환 대상의 카메라와 HUD, 스크립트를 새로 초기화합니다.
+
+에디터의 **Play**는 현재 편집 중인 씬에서 시작합니다. **Stop**을 누르면 편집 중이던 씬으로 돌아갑니다. **Remove Scene**은 프로젝트 목록에서 항목을 빼고 씬 파일은 보존합니다. 시작 씬을 제거하려면 먼저 다른 씬을 시작으로 지정합니다.
+
+[Pulse Range 프로젝트](../examples/pulse-range/Pulse%20Range.futty.project.ron)를 **File → Project → Open Project…**에서 열고 **Play → Enter practice range**를 눌러 로비에서 연습장으로 전환할 수 있습니다.
 
 ## Windows 게임 내보내기
 
 **File → Export Windows Game…**에서 저장한 씬의 출력 위치를 선택합니다. 만들어진 `*-Windows` 폴더는 씬, 참조 에셋, 실행 설정과 `Game.exe`를 포함합니다. 폴더 전체를 옮긴 뒤 `Game.exe`를 실행하면 에디터 없이 게임이 열립니다. 씬에 카메라가 없으면 내보내기 당시의 Scene 카메라로 실행합니다.
 
+프로젝트를 열어 둔 상태에서는 **Export Windows Project…**로 등록한 모든 씬과 참조 에셋을 묶습니다. `Game.exe`는 시작 씬에서 열립니다.
+
 Windows x64에서 CLI로도 실행할 수 있습니다. 출력은 아직 없는 폴더를 지정합니다. 씬에 카메라가 없으면 CLI는 기본 카메라를 사용합니다.
 
 ```powershell
 futty-editor.exe --export .\Main.futty.scene.ron .\Main-Windows
+futty-editor.exe --export ".\examples\pulse-range\Pulse Range.futty.project.ron" .\Pulse-Range-Windows
 ```
 
 ## 검증
@@ -159,4 +215,4 @@ cargo test --locked --workspace
 - WAV 또는 OGG Vorbis 클립을 **Project → Import…**로 가져옵니다. 에셋을 우클릭해 **Preview Audio**로 미리 듣고 **Attach to Selection**으로 선택한 오브젝트에 연결합니다.
 - **Inspector → Audio**에서 볼륨, 반복, 시작 조건을 편집합니다. **On Play**는 재생을 시작할 때, **On trigger enter**는 연결된 오브젝트가 트리거 진입 이벤트에 참여할 때 재생합니다. 씬에 오디오 리스너를 하나 추가해 전체 볼륨을 설정할 수 있습니다. **Stop**은 Play 중 재생한 사운드를 정지합니다.
 
-현재 모델 가져오기 범위는 정적 삼각형 GLB입니다. GLB의 텍스처는 파일에 내장되어야 하며 재질은 불투명 기본색 기준으로 렌더링합니다. 거리 감쇠·공간 팬닝, 애니메이션, 독립 플레이어, Laboratory Escape는 이후 단계입니다.
+GLB는 삼각형 메시와 내장 텍스처를 사용합니다. 재질은 불투명 기본색 기준으로 렌더링합니다. 오디오 거리 감쇠와 공간 팬닝은 후속 범위입니다.

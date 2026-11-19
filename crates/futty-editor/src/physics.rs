@@ -1,6 +1,6 @@
 use eframe::egui;
 use egui::RichText;
-use futty_runtime::{Body, Motion, Object, Scene};
+use futty_runtime::{Body, CharacterController, Motion, Object, Scene};
 use glam::{Quat, Vec3};
 use uuid::Uuid;
 
@@ -12,14 +12,14 @@ pub fn inspector(ui: &mut egui::Ui, object: &mut Object, [min, max]: [Vec3; 2]) 
     ui.separator();
     let mut enabled = object.body.is_some();
     let response = ui.add_enabled(
-        object.parent.is_none(),
+        object.parent.is_none() && object.character.is_none(),
         egui::Checkbox::new(&mut enabled, "Rigid body"),
     );
     if response.changed() {
         object.body = enabled.then(|| fitted_box(min, max));
     }
     if object.parent.is_some() {
-        ui.label(RichText::new("Rigid bodies use scene-root transforms.").color(MUTED));
+        ui.label(RichText::new("Physics uses scene-root transforms.").color(MUTED));
     }
     if let Some(body) = &mut object.body {
         egui::ComboBox::from_id_salt("body-motion")
@@ -31,6 +31,11 @@ pub fn inspector(ui: &mut egui::Ui, object: &mut Object, [min, max]: [Vec3; 2]) 
             });
         ui.checkbox(&mut body.sensor, "Trigger sensor")
             .on_hover_text("Reports objects entering and leaving this volume");
+        ui.horizontal(|ui| {
+            ui.label("Collision layer");
+            ui.add(egui::DragValue::new(&mut body.layers.layer).range(1..=32));
+        });
+        collision_mask(ui, &mut body.layers.mask);
         if body.motion == Motion::Dynamic {
             scalar_field(ui, "Mass (kg)", &mut body.mass, 0.01..=1000.0);
             scalar_field(ui, "Gravity scale", &mut body.gravity_scale, 0.0..=10.0);
@@ -54,12 +59,55 @@ pub fn inspector(ui: &mut egui::Ui, object: &mut Object, [min, max]: [Vec3; 2]) 
             0.025,
         );
     }
-    if object
-        .body
-        .is_none_or(|body| body.motion == Motion::Kinematic)
+    let mut controlled = object.character.is_some();
+    if ui
+        .add_enabled(
+            object.parent.is_none() && object.body.is_none(),
+            egui::Checkbox::new(&mut controlled, "Character controller"),
+        )
+        .changed()
+    {
+        object.character = controlled.then(CharacterController::default);
+    }
+    if let Some(character) = &mut object.character {
+        let max_radius = (character.height * 0.5).min(2.0);
+        scalar_field(
+            ui,
+            "Capsule radius",
+            &mut character.radius,
+            0.05..=max_radius,
+        );
+        scalar_field(
+            ui,
+            "Capsule height",
+            &mut character.height,
+            character.radius * 2.0..=8.0,
+        );
+        scalar_field(
+            ui,
+            "Origin above feet",
+            &mut character.origin_height,
+            0.0..=8.0,
+        );
+        scalar_field(ui, "Move speed", &mut character.speed, 0.1..=50.0);
+        scalar_field(ui, "Jump speed", &mut character.jump_speed, 0.0..=30.0);
+        collision_mask(ui, &mut character.collision_mask);
+    }
+    if object.character.is_none()
+        && object
+            .body
+            .is_none_or(|body| body.motion == Motion::Kinematic)
     {
         ui.checkbox(&mut object.spin, "Rotate in Play");
     }
+}
+
+fn collision_mask(ui: &mut egui::Ui, mask: &mut u32) {
+    ui.horizontal(|ui| {
+        ui.label("Collision mask");
+        ui.add(egui::DragValue::new(mask).hexadecimal(8, false, true))
+            .on_hover_text("Bit 0 is layer 1, bit 31 is layer 32. FFFFFFFF selects all layers.");
+    });
 }
 
 fn fitted_box(min: Vec3, max: Vec3) -> Body {

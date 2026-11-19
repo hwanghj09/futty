@@ -30,17 +30,20 @@ cargo run --locked -p futty-editor -- --edit "examples/pulse-range/Pulse Range.f
 
 | 기능 | 지원 범위 |
 | --- | --- |
-| 씬 편집 | 계층, 다중 선택, 이동·회전·크기 조절, 스냅, Undo/Redo, 프리팹 |
+| 씬 편집 | 계층, 다중 선택, 이동·회전·크기 조절, 스냅, Undo/Redo, 연결형 프리팹 |
 | 카메라와 렌더링 | 원근·정사영 카메라, Scene/Game 뷰, Sky 배경, wgpu 렌더링, 조명과 그림자 |
-| 에셋 | GLB 메시, PNG 텍스처, 공유 머티리얼, Sprite3D, WAV·Ogg 효과음 |
+| 에셋 | GLB 메시·스켈레톤 애니메이션·UUID 유지 재가져오기, PNG 텍스처, 공유 머티리얼, Sprite3D, WAV·Ogg 효과음 |
 | 게임 실행 | ECS 런타임, Rapier 물리, Rhai 스크립트, Windows 게임 내보내기 |
+| 프로젝트 | 시작 씬 지정, 런타임 씬 전환, 여러 씬을 묶은 Windows 빌드 |
 | 자동화 | Codex에서 로컬 MCP로 씬 생성·조회, Sky 전환, 카메라 추가·선택 |
 
 ## 예제
 
 | 예제 | 열거나 실행하는 방법 |
 | --- | --- |
-| [Pulse Range](examples/pulse-range/) | `Pulse Range.futty.scene.ron`을 열고 **Play** |
+| [Pulse Range](examples/pulse-range/) | 연습장 씬을 바로 열거나 프로젝트를 열어 로비에서 시작 |
+| [Beacon Bot](examples/animation-playground/Beacon%20Bot.futty.scene.ron) | 씬을 열고 **Play**를 눌러 Idle·Walk·Signal 전환 |
+| [Prefab Workshop](examples/prefab-playground/Prefab%20Workshop.futty.scene.ron) | 원본을 편집해 인스턴스 갱신과 오버라이드 확인 |
 | [Workshop GLB와 텍스처](examples/asset-preview/) | **Project → Import…**에서 GLB와 PNG 가져오기 |
 | [Rhai 이동](examples/script-playground/) | **File → Script Playground** |
 | [Sprite3D](examples/sprite-playground/) | **File → Sprite Playground** |

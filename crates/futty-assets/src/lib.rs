@@ -1,7 +1,11 @@
+mod animation;
+
+pub use animation::{AnimationSample, Clip, Rig};
+
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{Cursor, Read, Write},
     ops::Range,
     path::{Path, PathBuf},
@@ -35,6 +39,7 @@ pub struct Model {
     pub parts: Vec<Part>,
     pub textures: Vec<RgbaImage>,
     pub bounds: [Vec3; 2],
+    pub rig: Option<Rig>,
 }
 
 pub fn read(path: &Path) -> AssetResult<Vec<u8>> {
@@ -95,10 +100,61 @@ pub fn save(scene: &Path, asset: &Asset, bytes: &[u8]) -> AssetResult<()> {
             Err(format!("Asset UUID collision for {}", asset.name).into())
         };
     }
+    write_asset(&path, bytes, false)
+}
+
+pub fn replace_saved_model(
+    scene: &Path,
+    asset: &Asset,
+    expected: Option<&[u8]>,
+    bytes: &[u8],
+) -> AssetResult<()> {
+    if asset.kind != AssetKind::Model {
+        return Err("Reimport requires a GLB model asset".into());
+    }
+    let dir = directory(scene, true)?;
+    let path = dir.join(filename(asset));
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join(".futty-reimport.lock"))?;
+    lock.lock()?;
+    match path.symlink_metadata() {
+        Ok(_) => {
+            let current = read_saved(scene, asset)?;
+            if current == bytes {
+                return Ok(());
+            }
+            let matches_loaded =
+                expected.map_or_else(|| model(&current).is_err(), |expected| current == expected);
+            if !matches_loaded {
+                return Err(format!(
+                    "{} changed on disk. Reopen the scene before reimporting.",
+                    asset.name
+                )
+                .into());
+            }
+            write_asset(&path, bytes, true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            write_asset(&path, bytes, false)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_asset(path: &Path, bytes: &[u8], replace: bool) -> AssetResult<()> {
+    let dir = path.parent().ok_or("Missing asset folder")?;
     let mut temp = tempfile::NamedTempFile::new_in(dir)?;
     temp.write_all(bytes)?;
     temp.as_file().sync_all()?;
-    temp.persist_noclobber(path)?;
+    if replace {
+        temp.persist(path)?;
+    } else {
+        temp.persist_noclobber(path)?;
+    }
     Ok(())
 }
 
@@ -161,7 +217,15 @@ pub fn model(bytes: &[u8]) -> AssetResult<Model> {
         .default_scene()
         .or_else(|| glb.scenes().next())
         .ok_or("GLB has no scene")?;
-    let mut nodes: Vec<_> = scene.nodes().map(|node| (node, Mat4::IDENTITY)).collect();
+    let animated = glb.animations().len() != 0 || glb.skins().len() != 0;
+    if animated && (glb.animations().len() > 256 || glb.nodes().len() > 4096) {
+        return Err("GLB animation node or clip limit exceeded".into());
+    }
+    let mut slots = vec![None; if animated { glb.nodes().len() } else { 0 }];
+    let mut nodes: Vec<_> = scene
+        .nodes()
+        .map(|node| (node, Mat4::IDENTITY, None))
+        .collect();
     let mut visited = HashSet::new();
     let mut textures = HashMap::new();
     let mut result = Model {
@@ -170,18 +234,27 @@ pub fn model(bytes: &[u8]) -> AssetResult<Model> {
         parts: Vec::new(),
         textures: Vec::new(),
         bounds: [Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)],
+        rig: animated.then(Rig::default),
     };
-    while let Some((node, parent)) = nodes.pop() {
+    while let Some((node, parent, rig_parent)) = nodes.pop() {
         if !visited.insert(node.index()) {
             return Err("GLB node has more than one parent or forms a cycle".into());
         }
         let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
-        nodes.extend(node.children().map(|child| (child, world)));
+        let slot = if let Some(rig) = &mut result.rig {
+            let slot = rig.nodes.len();
+            slots[node.index()] = Some(slot);
+            rig.nodes.push(animation::Node::new(&node, rig_parent)?);
+            Some(slot)
+        } else {
+            None
+        };
+        nodes.extend(node.children().map(|child| (child, world, slot)));
         let Some(mesh) = node.mesh() else { continue };
-        if node.skin().is_some() || !world.is_finite() || world.determinant().abs() < 1e-12 {
-            return Err("GLB has a skinned mesh or an invalid node transform".into());
+        let skin = node.skin();
+        if skin.is_none() && (!world.is_finite() || world.determinant().abs() < 1e-12) {
+            return Err("GLB has an invalid mesh node transform".into());
         }
-        let normal_matrix = world.inverse().transpose();
         for primitive in mesh.primitives() {
             if primitive.mode() != gltf::mesh::Mode::Triangles {
                 return Err("Only triangle meshes are supported".into());
@@ -194,9 +267,7 @@ pub fn model(bytes: &[u8]) -> AssetResult<Model> {
             if count == 0 || result.vertices.len() + count > MAX_VERTICES {
                 return Err("GLB vertex limit exceeded or mesh is empty".into());
             }
-            let positions: Vec<_> = positions
-                .map(|p| world.transform_point3(Vec3::from(p)))
-                .collect();
+            let positions: Vec<_> = positions.map(Vec3::from).collect();
             let mut indices: Vec<u32> = reader.read_indices().map_or_else(
                 || (0..count as u32).collect(),
                 |idx| idx.into_u32().collect(),
@@ -209,19 +280,8 @@ pub fn model(bytes: &[u8]) -> AssetResult<Model> {
             {
                 return Err("Invalid or oversized GLB triangle index data".into());
             }
-            if world.determinant() < 0.0 {
-                for triangle in indices.as_chunks_mut::<3>().0 {
-                    triangle.swap(1, 2);
-                }
-            }
             let normals: Vec<_> = if let Some(normals) = reader.read_normals() {
-                normals
-                    .map(|n| {
-                        normal_matrix
-                            .transform_vector3(Vec3::from(n))
-                            .normalize_or_zero()
-                    })
-                    .collect()
+                normals.map(Vec3::from).collect()
             } else {
                 let mut normals = vec![Vec3::ZERO; count];
                 for triangle in indices.as_chunks::<3>().0 {
@@ -243,6 +303,7 @@ pub fn model(bytes: &[u8]) -> AssetResult<Model> {
             if uv.len() != count
                 || normals.len() != count
                 || positions.iter().any(|p| !p.is_finite())
+                || normals.iter().any(|n| !n.is_finite())
                 || uv.iter().flatten().any(|value| !value.is_finite())
             {
                 return Err("Invalid GLB vertex data".into());
@@ -284,17 +345,50 @@ pub fn model(bytes: &[u8]) -> AssetResult<Model> {
             };
             let vertex_base = result.vertices.len() as u32;
             let start = result.indices.len() as u32;
+            if skin.is_none() && world.determinant() < 0.0 {
+                for triangle in indices.as_chunks_mut::<3>().0 {
+                    triangle.swap(1, 2);
+                }
+            }
             result
                 .indices
                 .extend(indices.into_iter().map(|index| index + vertex_base));
-            for ((position, normal), uv) in positions.into_iter().zip(normals).zip(uv) {
-                result.bounds[0] = result.bounds[0].min(position);
-                result.bounds[1] = result.bounds[1].max(position);
-                result.vertices.push(Vertex {
-                    position: position.to_array(),
-                    normal: normal.to_array(),
-                    uv,
-                });
+            if let Some(rig) = &mut result.rig {
+                let deform = if let Some(skin) = &skin {
+                    animation::Deform::Skin(
+                        skin.index(),
+                        animation::influences(&primitive, bin, count, skin.joints().len())?,
+                    )
+                } else {
+                    animation::Deform::Rigid(slot.expect("rig node was recorded"))
+                };
+                let base = vertex_base as usize;
+                rig.groups.push((base..base + count, deform));
+                result
+                    .vertices
+                    .extend(positions.into_iter().zip(normals).zip(uv).map(
+                        |((position, normal), uv)| Vertex {
+                            position: position.to_array(),
+                            normal: normal.to_array(),
+                            uv,
+                        },
+                    ));
+            } else {
+                let normal_matrix = animation::normal_matrix(world);
+                result
+                    .vertices
+                    .extend(positions.into_iter().zip(normals).zip(uv).map(
+                        |((position, normal), uv)| {
+                            Vertex {
+                                position: world.transform_point3(position).to_array(),
+                                normal: normal_matrix
+                                    .transform_vector3(normal)
+                                    .normalize_or_zero()
+                                    .to_array(),
+                                uv,
+                            }
+                        },
+                    ));
             }
             result.parts.push(Part {
                 indices: start..result.indices.len() as u32,
@@ -306,6 +400,20 @@ pub fn model(bytes: &[u8]) -> AssetResult<Model> {
     if result.parts.is_empty() {
         return Err("GLB has no triangle mesh in its default scene".into());
     }
+    if let Some(rig) = &mut result.rig {
+        result.vertices = rig.finish(&glb, &slots, bin, std::mem::take(&mut result.vertices))?;
+        if rig.clips().is_empty() {
+            result.rig = None;
+        }
+    }
+    for vertex in &result.vertices {
+        let position = Vec3::from(vertex.position);
+        if !position.is_finite() {
+            return Err("GLB pose produces non-finite geometry".into());
+        }
+        result.bounds[0] = result.bounds[0].min(position);
+        result.bounds[1] = result.bounds[1].max(position);
+    }
     Ok(result)
 }
 
@@ -315,6 +423,54 @@ mod tests {
 
     const CRATE: &[u8] = include_bytes!("../../../examples/asset-preview/Workshop Crate.glb");
     const GRID: &[u8] = include_bytes!("../../../examples/asset-preview/Workshop Grid.png");
+
+    #[test]
+    fn imports_beacon_bot_skin_and_evaluates_clips_with_looping_and_clamping() {
+        let bot = model(include_bytes!(
+            "../../../examples/animation-playground/Assets/Futty/6c5cb6d0-3ec5-4142-8af3-368c0c033dde.glb"
+        )).unwrap();
+        let rig = bot.rig.as_ref().unwrap();
+        assert_eq!(
+            rig.clips()
+                .iter()
+                .map(|clip| clip.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Idle", "Walk", "Signal"]
+        );
+        let sample = |clip, seconds, looping| {
+            let mut vertices = Vec::new();
+            assert!(rig.sample(
+                AnimationSample {
+                    clip,
+                    seconds,
+                    looping
+                },
+                &mut vertices
+            ));
+            assert_eq!(vertices.len(), bot.vertices.len());
+            assert!(
+                vertices
+                    .iter()
+                    .all(|vertex| Vec3::from(vertex.normal).is_normalized())
+            );
+            vertices
+        };
+        let distance = |a: &[Vertex], b: &[Vertex]| {
+            a.iter()
+                .zip(b)
+                .map(|(a, b)| Vec3::from(a.position).distance(Vec3::from(b.position)))
+                .fold(0.0f32, f32::max)
+        };
+        assert!(distance(&bot.vertices, &sample(0, 0.0, false)) < 1e-5);
+        assert!(distance(&bot.vertices, &sample(2, 0.61, false)) > 0.7);
+        assert!(distance(&sample(2, 1.65, false), &sample(2, 9.0, false)) < 1e-5);
+        assert!(
+            distance(
+                &sample(1, 0.3, true),
+                &sample(1, f64::from(rig.clips()[1].duration) + 0.3, true)
+            ) < 1e-5
+        );
+    }
 
     #[test]
     fn imports_static_parts_and_embedded_texture() {

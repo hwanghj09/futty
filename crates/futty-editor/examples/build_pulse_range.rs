@@ -1,8 +1,11 @@
 use std::{error::Error, path::Path};
 
 use futty_core::{Asset, AssetKind, Light, LightKind, Primitive, Surface};
-use futty_runtime::{AudioSource, AudioStart, Material, Object, RangeConfig, Scene};
-use glam::{Quat, Vec3};
+use futty_runtime::{
+    AudioSource, AudioStart, Body, CharacterController, HudAnchor, HudKind, HudWidget, Material,
+    Motion, Object, RangeConfig, Scene,
+};
+use glam::{Quat, Vec2, Vec3};
 use uuid::Uuid;
 
 fn object(name: &str, position: Vec3) -> Object {
@@ -10,6 +13,121 @@ fn object(name: &str, position: Vec3) -> Object {
     result.spin = false;
     result.color = [1.0; 3];
     result
+}
+
+fn add_range_colliders(scene: &mut Scene) {
+    for (name, center, size, color) in [
+        (
+            "Deck collider",
+            [0.0, -0.26, -1.75],
+            [15.6, 0.5, 26.0],
+            [0.04, 0.06, 0.08],
+        ),
+        (
+            "Left boundary",
+            [-7.67, 1.30, -1.9],
+            [0.40, 2.60, 25.9],
+            [0.08, 0.12, 0.15],
+        ),
+        (
+            "Right boundary",
+            [7.67, 1.30, -1.9],
+            [0.40, 2.60, 25.9],
+            [0.08, 0.12, 0.15],
+        ),
+        (
+            "Backstop collider",
+            [0.0, 2.38, -14.55],
+            [15.6, 4.75, 0.45],
+            [0.08, 0.12, 0.15],
+        ),
+        (
+            "Rear railing collider",
+            [0.0, 0.65, 11.10],
+            [15.5, 1.29, 0.29],
+            [0.08, 0.12, 0.15],
+        ),
+        (
+            "Left practice cover",
+            [-3.35, 1.01, 0.10],
+            [1.65, 2.02, 0.70],
+            [0.11, 0.19, 0.22],
+        ),
+        (
+            "Right practice cover",
+            [3.35, 1.01, -0.60],
+            [1.65, 2.02, 0.70],
+            [0.11, 0.19, 0.22],
+        ),
+    ] {
+        let mut obstacle = object(name, Vec3::from(center));
+        obstacle.transform.scale = Vec3::from(size);
+        obstacle.color = color;
+        obstacle.body = Some(Body {
+            motion: Motion::Fixed,
+            ..Default::default()
+        });
+        scene.entities.push(obstacle);
+    }
+}
+
+fn add_range_hud(scene: &mut Scene) {
+    use HudAnchor::{BottomRight, TopLeft, TopRight};
+    use HudKind::{Gauge, Text};
+
+    for (kind, anchor, label, binding, offset, size) in [
+        (
+            Text,
+            TopLeft,
+            "SCORE",
+            "range.score",
+            [16.0, 16.0],
+            [132.0, 54.0],
+        ),
+        (
+            Text,
+            TopRight,
+            "TIME LEFT",
+            "range.time",
+            [16.0, 16.0],
+            [132.0, 54.0],
+        ),
+        (
+            Gauge,
+            TopRight,
+            "",
+            "range.time_fraction",
+            [16.0, 76.0],
+            [132.0, 6.0],
+        ),
+        (
+            Text,
+            BottomRight,
+            "MAGAZINE",
+            "range.ammo",
+            [16.0, 16.0],
+            [154.0, 54.0],
+        ),
+        (
+            Text,
+            TopLeft,
+            "",
+            "range.streak",
+            [16.0, 76.0],
+            [180.0, 30.0],
+        ),
+    ] {
+        let mut widget = HudWidget::new(kind);
+        widget.anchor = anchor;
+        widget.label = label.into();
+        widget.binding = binding.into();
+        widget.offset = Vec2::from_array(offset);
+        widget.size = Vec2::from_array(size);
+        if binding == "range.streak" {
+            widget.text_size = 13.0;
+        }
+        scene.hud.push(widget);
+    }
 }
 
 fn asset(
@@ -68,6 +186,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut camera = scene.entities[camera_index].clone();
     camera.transform.translation = Vec3::new(0.0, 1.65, 8.7);
     camera.transform.rotation = Quat::IDENTITY;
+    camera.character = Some(CharacterController::default());
     let lens = camera.camera.as_mut().unwrap();
     lens.fov = 68.0;
     lens.far = 130.0;
@@ -184,6 +303,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         flash: flash_id,
         drones,
     });
+    add_range_colliders(&mut scene);
+    add_range_hud(&mut scene);
     scene.save(scene_path)?;
     println!("Assembled {}", scene_path.display());
     Ok(())

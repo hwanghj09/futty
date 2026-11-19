@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{
     selection::Selection,
     transform_tool::{TransformGroup, TransformSettings},
@@ -29,6 +31,7 @@ pub struct Viewport {
     orbiting: bool,
     gpu: RenderState,
     renderer: Renderer,
+    hud_images: HashMap<Uuid, egui::TextureHandle>,
     views: [(Targets, egui::TextureId); 2],
     drag: Option<AxisDrag>,
 }
@@ -40,7 +43,20 @@ struct AxisDrag {
     pixels_per_unit: Vec2,
 }
 
+impl Drop for Viewport {
+    fn drop(&mut self) {
+        let mut renderer = self.gpu.renderer.write();
+        for (_, image) in &self.views {
+            renderer.free_texture(image);
+        }
+    }
+}
+
 impl Viewport {
+    pub(crate) fn gpu(&self) -> RenderState {
+        self.gpu.clone()
+    }
+
     pub fn new(gpu: RenderState) -> Self {
         let renderer = Renderer::new(&gpu.device, &gpu.queue);
         let views = std::array::from_fn(|_| {
@@ -63,6 +79,7 @@ impl Viewport {
             orbiting: false,
             gpu,
             renderer,
+            hud_images: HashMap::new(),
             views,
             drag: None,
         }
@@ -70,16 +87,12 @@ impl Viewport {
 
     pub fn clear_assets(&mut self) {
         self.renderer.clear_assets();
+        self.hud_images.clear();
     }
 
     pub fn upload(&mut self, asset: &Asset, bytes: &[u8]) -> futty_assets::AssetResult<()> {
         match asset.kind {
-            AssetKind::Model => self.renderer.upload_model(
-                &self.gpu.device,
-                &self.gpu.queue,
-                asset.id,
-                futty_assets::model(bytes)?,
-            ),
+            AssetKind::Model => self.upload_model(asset.id, futty_assets::model(bytes)?),
             AssetKind::Texture => {
                 let image = futty_assets::png(bytes)?;
                 self.renderer.upload_image(
@@ -93,6 +106,11 @@ impl Viewport {
             _ => return Err("Expected a mesh or texture".into()),
         }
         Ok(())
+    }
+
+    pub(crate) fn upload_model(&mut self, id: Uuid, model: futty_assets::Model) {
+        self.renderer
+            .upload_model(&self.gpu.device, &self.gpu.queue, id, model);
     }
 
     pub fn bounds(&self, mesh: Option<Uuid>) -> [Vec3; 2] {
@@ -111,6 +129,30 @@ impl Viewport {
 
     pub fn texture_size(&self, id: Uuid) -> Option<[u32; 2]> {
         self.renderer.texture_size(id)
+    }
+
+    pub fn clips(&self, mesh: Uuid) -> &[futty_assets::Clip] {
+        self.renderer.clips(mesh)
+    }
+
+    pub(crate) fn hud_image(
+        &mut self,
+        ctx: &egui::Context,
+        id: Uuid,
+        bytes: Option<&[u8]>,
+    ) -> Option<(egui::TextureId, Vec2)> {
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.hud_images.entry(id) {
+            let png = futty_assets::png(bytes?).ok()?;
+            let size = [png.width() as usize, png.height() as usize];
+            entry.insert(ctx.load_texture(
+                id.to_string(),
+                egui::ColorImage::from_rgba_unmultiplied(size, png.as_raw()),
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+        self.hud_images
+            .get(&id)
+            .map(|image| (image.id(), image.size_vec2()))
     }
 
     pub fn render(&mut self, ui: &egui::Ui, rect: Rect, mut scene: RenderScene<'_>, game: bool) {

@@ -2,6 +2,7 @@ use std::{collections::VecDeque, sync::mpsc};
 
 use futty_core::Transform;
 use glam::{Quat, Vec3};
+use rapier3d::control::KinematicCharacterController;
 use rapier3d::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -37,6 +38,37 @@ pub struct Body {
     pub friction: f32,
     pub restitution: f32,
     pub sensor: bool,
+    #[serde(default, skip_serializing_if = "CollisionLayers::is_default")]
+    pub layers: CollisionLayers,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CollisionLayers {
+    pub layer: u8,
+    pub mask: u32,
+}
+
+impl Default for CollisionLayers {
+    fn default() -> Self {
+        Self {
+            layer: 1,
+            mask: u32::MAX,
+        }
+    }
+}
+
+impl CollisionLayers {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn groups(self) -> InteractionGroups {
+        InteractionGroups::new(
+            Group::from_bits_truncate(1 << (self.layer - 1)),
+            Group::from_bits_truncate(self.mask),
+            InteractionTestMode::And,
+        )
+    }
 }
 
 impl Default for Body {
@@ -50,6 +82,7 @@ impl Default for Body {
             friction: 0.6,
             restitution: 0.1,
             sensor: false,
+            layers: CollisionLayers::default(),
         }
     }
 }
@@ -69,6 +102,7 @@ impl Body {
             && (0.0..=10.0).contains(&self.gravity_scale)
             && (0.0..=5.0).contains(&self.friction)
             && (0.0..=1.0).contains(&self.restitution)
+            && (1..=32).contains(&self.layers.layer)
     }
 }
 
@@ -78,6 +112,14 @@ pub struct PhysicsEvent {
     pub second: Uuid,
     pub started: bool,
     pub sensor: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RayHit {
+    pub entity: Uuid,
+    pub distance: f32,
+    pub position: Vec3,
+    pub normal: Vec3,
 }
 
 impl PhysicsEvent {
@@ -97,6 +139,7 @@ pub(crate) struct Physics {
     incoming: mpsc::Receiver<CollisionEvent>,
     events: VecDeque<PhysicsEvent>,
     recent: Vec<PhysicsEvent>,
+    prepared: bool,
 }
 
 impl Physics {
@@ -116,6 +159,7 @@ impl Physics {
             incoming,
             events: VecDeque::new(),
             recent: Vec::new(),
+            prepared: false,
         }
     }
 
@@ -143,6 +187,7 @@ impl Physics {
             .mass(config.mass)
             .friction(config.friction)
             .restitution(config.restitution)
+            .collision_groups(config.layers.groups())
             .sensor(config.sensor)
             .user_data(id.as_u128())
             .active_events(ActiveEvents::COLLISION_EVENTS)
@@ -178,9 +223,14 @@ impl Physics {
     pub(crate) fn step(&mut self) {
         self.recent.clear();
         self.world.step_with_events(&(), &self.collector);
+        self.prepared = true;
         for event in self.incoming.try_iter() {
-            let first = &self.world.colliders[event.collider1()];
-            let second = &self.world.colliders[event.collider2()];
+            let (Some(first), Some(second)) = (
+                self.world.colliders.get(event.collider1()),
+                self.world.colliders.get(event.collider2()),
+            ) else {
+                continue;
+            };
             let (first, second) = if second.is_sensor() && !first.is_sensor() {
                 (second, first)
             } else {
@@ -214,7 +264,74 @@ impl Physics {
         self.world.bodies.len()
     }
 
+    pub(crate) fn remove(&mut self, body: RigidBodyHandle) {
+        self.world.remove_body(body);
+    }
+
     pub(crate) fn events(&self) -> &VecDeque<PhysicsEvent> {
         &self.events
     }
+
+    pub(crate) fn raycast(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        distance: f32,
+        mask: u32,
+    ) -> Option<RayHit> {
+        if !origin.is_finite() || !distance.is_finite() || distance <= 0.0 || mask == 0 {
+            return None;
+        }
+        let direction = direction.try_normalize()?;
+        let ray = Ray::new(
+            Vector::from_array(origin.to_array()),
+            Vector::from_array(direction.to_array()),
+        );
+        let (collider, impact) =
+            self.world
+                .cast_ray_and_get_normal(&ray, distance, true, query_filter(mask))?;
+        Some(RayHit {
+            entity: Uuid::from_u128(self.world.colliders[collider].user_data),
+            distance: impact.time_of_impact,
+            position: origin + direction * impact.time_of_impact,
+            normal: Vec3::from_array(impact.normal.to_array()),
+        })
+    }
+
+    pub(crate) fn move_capsule(
+        &self,
+        dt: f32,
+        center: Vec3,
+        size: [f32; 2],
+        delta: Vec3,
+        mask: u32,
+    ) -> (Vec3, bool) {
+        if self.count() > 0 && !self.prepared {
+            return (Vec3::ZERO, false);
+        }
+        let [radius, height] = size;
+        let capsule = Capsule::new_y(height * 0.5 - radius, radius);
+        let result = KinematicCharacterController::default().move_shape(
+            dt,
+            &self.world.query_pipeline_with_filter(query_filter(mask)),
+            &capsule,
+            &Pose::from_translation(Vector::from_array(center.to_array())),
+            Vector::from_array(delta.to_array()),
+            |_| {},
+        );
+        (
+            Vec3::from_array(result.translation.to_array()),
+            result.grounded,
+        )
+    }
+}
+
+fn query_filter(mask: u32) -> QueryFilter<'static> {
+    QueryFilter::default()
+        .exclude_sensors()
+        .groups(InteractionGroups::new(
+            Group::ALL,
+            Group::from_bits_truncate(mask),
+            InteractionTestMode::And,
+        ))
 }

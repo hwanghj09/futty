@@ -48,6 +48,9 @@ impl Editor {
 }
 
 pub(crate) fn pump(audio: &mut futty_audio::Audio, runtime: &mut Runtime) -> Option<String> {
+    for object in runtime.drain_stopped_audio() {
+        audio.stop_object(object);
+    }
     let volume = runtime.audio_gain();
     let mut issue = None;
     for cue in runtime.drain_audio() {

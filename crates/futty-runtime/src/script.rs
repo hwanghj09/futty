@@ -5,7 +5,7 @@ use std::{
 };
 
 use futty_core::Transform;
-use glam::{EulerRot, Quat, Vec3};
+use glam::{EulerRot, Quat, Vec2, Vec3};
 use rhai::{
     AST, CallFnOptions, Dynamic, Engine, EvalAltResult, FLOAT, ImmutableString, Map,
     OptimizationLevel, Scope,
@@ -61,6 +61,55 @@ impl ScriptValue {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum InputAction {
+    MoveForward,
+    MoveBackward,
+    MoveLeft,
+    MoveRight,
+    Jump,
+    Fire,
+    Reload,
+    Interact,
+    Retry,
+}
+
+impl InputAction {
+    pub const ALL: [Self; 9] = [
+        Self::MoveForward,
+        Self::MoveBackward,
+        Self::MoveLeft,
+        Self::MoveRight,
+        Self::Jump,
+        Self::Fire,
+        Self::Reload,
+        Self::Interact,
+        Self::Retry,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::MoveForward => "MoveForward",
+            Self::MoveBackward => "MoveBackward",
+            Self::MoveLeft => "MoveLeft",
+            Self::MoveRight => "MoveRight",
+            Self::Jump => "Jump",
+            Self::Fire => "Fire",
+            Self::Reload => "Reload",
+            Self::Interact => "Interact",
+            Self::Retry => "Retry",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActionState {
+    pub held: bool,
+    pub pressed: bool,
+    pub released: bool,
+}
+
 #[derive(Clone, Default)]
 pub struct GameInput {
     pub forward: bool,
@@ -69,27 +118,63 @@ pub struct GameInput {
     pub right: bool,
     pub held: Vec<&'static str>,
     pub range: crate::RangeInput,
+    pub actions: [ActionState; InputAction::ALL.len()],
+    pub mouse_delta: Vec2,
 }
 
 impl GameInput {
-    fn down(&self, action: &str) -> bool {
-        match action {
-            "MoveForward" => self.forward,
-            "MoveBackward" => self.backward,
-            "MoveLeft" => self.left,
-            "MoveRight" => self.right,
+    pub fn action(&self, action: InputAction) -> ActionState {
+        let mut state = self.actions[action as usize];
+        state.held |= match action {
+            InputAction::MoveForward => self.forward,
+            InputAction::MoveBackward => self.backward,
+            InputAction::MoveLeft => self.left,
+            InputAction::MoveRight => self.right,
             _ => false,
-        }
+        };
+        state
+    }
+
+    fn named_action(&self, name: &str) -> ActionState {
+        InputAction::ALL
+            .into_iter()
+            .find(|action| action.name() == name)
+            .map_or_else(ActionState::default, |action| self.action(action))
     }
 }
 
 #[derive(Clone, Copy)]
 struct EntityRef(Uuid);
 
+pub(crate) const MAX_WORLD_COMMANDS: usize = 128;
+
+pub(crate) struct Message {
+    pub sender: Uuid,
+    pub target: Uuid,
+    pub name: String,
+}
+
+pub(crate) enum WorldCommand {
+    Message(Message),
+    Spawn {
+        prefab: Uuid,
+        root: Uuid,
+        position: Vec3,
+    },
+    Despawn(Uuid),
+    HudSet {
+        name: String,
+        value: ScriptValue,
+    },
+    LoadScene(String),
+}
+
 #[derive(Default)]
 pub(crate) struct Commands {
     pub velocity: Option<Vec3>,
     pub impulse: Vec3,
+    pub world: Vec<WorldCommand>,
+    pub animation: Option<(u32, bool)>,
 }
 
 #[derive(Default)]
@@ -103,11 +188,20 @@ struct Effects {
     logs: Vec<String>,
 }
 
+fn world_command(effects: &mut Effects, command: WorldCommand) -> RhaiResult<()> {
+    if effects.entity.is_none() || effects.physics.world.len() >= 8 {
+        return Err("An active entity can queue up to eight world commands per callback".into());
+    }
+    effects.physics.world.push(command);
+    Ok(())
+}
+
 pub(crate) enum Callback {
     Start,
     Update(f32),
     Fixed(f32),
     Event(&'static str, Uuid),
+    Message(Uuid, String),
 }
 
 impl Callback {
@@ -117,6 +211,7 @@ impl Callback {
             Self::Update(_) => "on_update",
             Self::Fixed(_) => "on_fixed_update",
             Self::Event(name, _) => name,
+            Self::Message(_, _) => "on_message",
         }
     }
 }
@@ -140,6 +235,9 @@ pub(crate) struct Scripts {
     disabled: HashSet<Uuid>,
     pub(crate) log: VecDeque<String>,
     pub(crate) input: Rc<GameInput>,
+    pub(crate) tags: Rc<RefCell<HashMap<String, Vec<Uuid>>>>,
+    pub(crate) prefabs: Rc<RefCell<HashMap<String, Uuid>>>,
+    pub(crate) hud_clicks: Rc<RefCell<HashSet<String>>>,
 }
 
 pub fn inspect_script(source: &str) -> Result<ScriptFields, String> {
@@ -165,6 +263,134 @@ impl Scripts {
             .set_optimization_level(OptimizationLevel::None);
         engine.disable_symbol("eval");
         engine.register_type_with_name::<EntityRef>("Entity");
+        let playback = effects.clone();
+        engine.register_fn(
+            "play_animation",
+            move |entity: EntityRef, clip: rhai::INT, looping: bool| -> RhaiResult<()> {
+                let mut effects = playback.borrow_mut();
+                if effects.entity != Some(entity.0) || !(0..256).contains(&clip) {
+                    return Err(
+                        "Expected the current entity and a GLB clip index from 0 to 255".into(),
+                    );
+                }
+                effects.physics.animation = Some((clip as u32, looping));
+                Ok(())
+            },
+        );
+        let tags = Rc::<RefCell<HashMap<String, Vec<Uuid>>>>::default();
+        let prefabs = Rc::<RefCell<HashMap<String, Uuid>>>::default();
+        let hud_clicks = Rc::<RefCell<HashSet<String>>>::default();
+        let scene_effects = effects.clone();
+        engine.register_fn("load_scene", move |id: ImmutableString| -> RhaiResult<()> {
+            if !crate::valid_scene_id(&id) {
+                return Err("Expected a scene ID of 1–128 bytes without control characters".into());
+            }
+            world_command(
+                &mut scene_effects.borrow_mut(),
+                WorldCommand::LoadScene(id.to_string()),
+            )
+        });
+        let clicks = hud_clicks.clone();
+        engine.register_fn("hud_pressed", move |name: ImmutableString| {
+            clicks.borrow().contains(name.as_str())
+        });
+        let values = effects.clone();
+        engine.register_fn(
+            "set_hud",
+            move |name: ImmutableString, value: Dynamic| -> RhaiResult<()> {
+                if !crate::hud::valid_binding(&name) {
+                    return Err("Expected a HUD binding name of 1–64 bytes".into());
+                }
+                let value = ScriptValue::from_dynamic(&value)
+                    .filter(ScriptValue::valid)
+                    .ok_or("HUD values must be finite numbers, booleans or text")?;
+                world_command(
+                    &mut values.borrow_mut(),
+                    WorldCommand::HudSet {
+                        name: name.to_string(),
+                        value,
+                    },
+                )
+            },
+        );
+        let lookup = tags.clone();
+        engine.register_fn("find_tag", move |tag: ImmutableString| -> Dynamic {
+            lookup
+                .borrow()
+                .get(tag.as_str())
+                .and_then(|ids| ids.first())
+                .map_or(Dynamic::UNIT, |&id| Dynamic::from(EntityRef(id)))
+        });
+        let lookup = tags.clone();
+        engine.register_fn(
+            "find_all_tagged",
+            move |tag: ImmutableString| -> rhai::Array {
+                lookup
+                    .borrow()
+                    .get(tag.as_str())
+                    .into_iter()
+                    .flatten()
+                    .take(128)
+                    .map(|&id| Dynamic::from(EntityRef(id)))
+                    .collect()
+            },
+        );
+        let messages = effects.clone();
+        engine.register_fn(
+            "send_event",
+            move |target: EntityRef, name: ImmutableString| -> RhaiResult<()> {
+                let mut effects = messages.borrow_mut();
+                let sender = effects
+                    .entity
+                    .ok_or("send_event requires an active entity")?;
+                if name.is_empty() || name.len() > 64 {
+                    return Err("Expected a 1–64 byte event name".into());
+                }
+                world_command(
+                    &mut effects,
+                    WorldCommand::Message(Message {
+                        sender,
+                        target: target.0,
+                        name: name.to_string(),
+                    }),
+                )
+            },
+        );
+        let templates = prefabs.clone();
+        let spawn = effects.clone();
+        engine.register_fn(
+            "spawn_prefab",
+            move |name: ImmutableString,
+                  x: Dynamic,
+                  y: Dynamic,
+                  z: Dynamic|
+                  -> RhaiResult<EntityRef> {
+                let prefab = templates
+                    .borrow()
+                    .get(name.as_str())
+                    .copied()
+                    .ok_or("Unknown prefab")?;
+                let position = Vec3::new(
+                    bounded(&x, 10_000.0)?,
+                    bounded(&y, 10_000.0)?,
+                    bounded(&z, 10_000.0)?,
+                );
+                let root = Uuid::new_v4();
+                world_command(
+                    &mut spawn.borrow_mut(),
+                    WorldCommand::Spawn {
+                        prefab,
+                        root,
+                        position,
+                    },
+                )?;
+                Ok(EntityRef(root))
+            },
+        );
+        let despawn = effects.clone();
+        engine.register_fn("despawn", move |root: EntityRef| -> RhaiResult<()> {
+            world_command(&mut despawn.borrow_mut(), WorldCommand::Despawn(root.0))
+        });
         engine.on_print(|_| {});
         engine.on_debug(|_, _, _| {});
         let output = effects.clone();
@@ -174,9 +400,26 @@ impl Scripts {
                 effects.logs.push(message.to_string());
             }
         });
-        let actions = effects.clone();
-        engine.register_fn("input_down", move |action: ImmutableString| {
-            actions.borrow().input.down(&action)
+        for (name, read) in [
+            (
+                "input_down",
+                (|state: ActionState| state.held) as fn(ActionState) -> bool,
+            ),
+            ("input_pressed", |state| state.pressed),
+            ("input_released", |state| state.released),
+        ] {
+            let actions = effects.clone();
+            engine.register_fn(name, move |action: ImmutableString| {
+                read(actions.borrow().input.named_action(&action))
+            });
+        }
+        let pointer = effects.clone();
+        engine.register_fn("mouse_delta_x", move || {
+            FLOAT::from(pointer.borrow().input.mouse_delta.x)
+        });
+        let pointer = effects.clone();
+        engine.register_fn("mouse_delta_y", move || {
+            FLOAT::from(pointer.borrow().input.mouse_delta.y)
         });
         let keys = effects.clone();
         engine.register_fn("key_down", move |key: ImmutableString| {
@@ -250,6 +493,9 @@ impl Scripts {
             disabled: HashSet::new(),
             log: VecDeque::new(),
             input: Rc::default(),
+            tags,
+            prefabs,
+            hud_clicks,
         }
     }
 
@@ -325,6 +571,15 @@ impl Scripts {
         );
     }
 
+    pub(crate) fn forget(&mut self, object: Uuid) {
+        self.instances.remove(&object);
+        self.disabled.remove(&object);
+        self.tags.borrow_mut().retain(|_, ids| {
+            ids.retain(|id| *id != object);
+            !ids.is_empty()
+        });
+    }
+
     pub(crate) fn call(
         &mut self,
         id: Uuid,
@@ -392,6 +647,13 @@ impl Scripts {
                 function,
                 (entity, EntityRef(other)),
             ),
+            Callback::Message(sender, name) => self.engine.call_fn_with_options::<Dynamic>(
+                options,
+                &mut scope,
+                &program.ast,
+                function,
+                (entity, EntityRef(sender), name),
+            ),
         };
         let effects = std::mem::take(&mut *self.effects.borrow_mut());
         if let Err(error) = result {
@@ -424,7 +686,7 @@ impl Scripts {
         self.push(format!("{label} ({id}) · {function} · {reason}"));
     }
 
-    fn push(&mut self, message: String) {
+    pub(crate) fn push(&mut self, message: String) {
         if self.log.len() == 32 {
             self.log.pop_front();
         }

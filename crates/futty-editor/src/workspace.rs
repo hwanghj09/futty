@@ -277,15 +277,20 @@ impl TabViewer for Workspace<'_> {
                 });
             }
             Panel::Console => {
-                if let Some((runtime, _)) = &self.editor.play {
-                    script_console(ui, runtime.script_log());
+                if let Some(play) = &self.editor.play {
+                    script_console(ui, play.runtime().script_log());
                 } else {
                     script_console(ui, self.editor.diagnostics.logs.iter().map(String::as_str));
                 }
             }
             Panel::Physics => {
                 let objects = &self.editor.doc.scene.entities;
-                if let Some((runtime, _)) = &self.editor.play {
+                if let Some(play) = &self.editor.play {
+                    let runtime = play.runtime();
+                    let objects = match play {
+                        crate::Play::Loaded(world) => &world.scene.entities,
+                        _ => objects,
+                    };
                     physics::events(
                         ui,
                         runtime.physics_body_count(),

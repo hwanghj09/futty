@@ -7,7 +7,7 @@ rust-version.workspace = true
 [dependencies]
 futty-core.workspace = true
 glam.workspace = true
-gltf = { version = "1.4.1", default-features = false, features = ["utils"] }
+gltf = { version = "1.4.1", default-features = false, features = ["names", "utils"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 tempfile = "3"
 bytemuck = { version = "1", features = ["derive"] }

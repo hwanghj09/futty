@@ -3,7 +3,11 @@ use glam::{Quat, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{GameInput, Object, Scene, SceneResult};
+use crate::{
+    GameInput, InputAction, Object, Scene, SceneResult,
+    character::{CharacterMotion, move_direction},
+    physics::Physics,
+};
 
 pub const ROUND_SECONDS: f32 = 45.0;
 pub const MAGAZINE: u8 = 8;
@@ -19,6 +23,10 @@ pub struct RangeConfig {
 }
 
 impl RangeConfig {
+    pub(crate) fn uses(&self, id: Uuid) -> bool {
+        self.weapon == id || self.flash == id || self.drones.contains(&id)
+    }
+
     fn actors<'a>(
         &self,
         scene: &'a Scene,
@@ -118,6 +126,8 @@ pub(crate) struct Range {
     cooldown: f32,
     reload: f32,
     marker: f32,
+    character: Option<CharacterMotion>,
+    shot_distance: f32,
 }
 
 impl Range {
@@ -139,6 +149,8 @@ impl Range {
             cooldown: 0.0,
             reload: 0.0,
             marker: 0.0,
+            character: camera.character.map(CharacterMotion::new),
+            shot_distance: camera.camera.unwrap_or_default().far,
         };
         range.reset();
         Ok(range)
@@ -168,6 +180,9 @@ impl Range {
         self.cooldown = 0.0;
         self.reload = 0.0;
         self.marker = 0.0;
+        if let Some(character) = &mut self.character {
+            character.reset();
+        }
         self.camera.pose = self.camera.base;
         self.weapon.pose = self.weapon.base;
         self.flash.pose.translation.y = -50.0;
@@ -189,7 +204,12 @@ impl Range {
             .map(|actor| actor.pose)
     }
 
-    pub(crate) fn update(&mut self, dt: f32, input: &GameInput) -> [Option<Uuid>; 2] {
+    pub(crate) fn update(
+        &mut self,
+        dt: f32,
+        input: &GameInput,
+        physics: &Physics,
+    ) -> [Option<Uuid>; 2] {
         let controls = input.range;
         if !controls.active {
             return [None; 2];
@@ -200,7 +220,7 @@ impl Range {
             }
             return [None; 2];
         }
-        self.move_player(dt, input);
+        self.move_player(dt, input, physics);
         self.status.remaining = (self.status.remaining - dt).max(0.0);
         self.cooldown = (self.cooldown - dt).max(0.0);
         self.marker = (self.marker - dt).max(0.0);
@@ -223,7 +243,7 @@ impl Range {
             if self.status.ammo == 0 {
                 self.reload = RELOAD_SECONDS;
             } else {
-                sounds = [Some(self.weapon.id), self.shoot()];
+                sounds = [Some(self.weapon.id), self.shoot(physics)];
             }
         }
         self.status.reloading = self.reload > 0.0;
@@ -241,23 +261,30 @@ impl Range {
         sounds
     }
 
-    fn move_player(&mut self, dt: f32, input: &GameInput) {
+    fn move_player(&mut self, dt: f32, input: &GameInput, physics: &Physics) {
         if input.range.look.is_finite() {
             self.view.yaw =
                 (self.view.yaw + input.range.look.x * 0.0024).rem_euclid(std::f32::consts::TAU);
             self.view.pitch = (self.view.pitch - input.range.look.y * 0.0024).clamp(-1.4, 1.4);
         }
-        let axis =
-            |positive: bool, negative: bool| i8::from(positive) as f32 - i8::from(negative) as f32;
         let flat = Vec3::new(self.view.yaw.sin(), 0.0, -self.view.yaw.cos());
-        let movement = flat * axis(input.forward, input.backward)
-            + flat.cross(Vec3::Y) * axis(input.right, input.left);
-        let center = self.camera.base.translation;
-        // shortcut: movement follows the rectangular firing deck, use scene colliders for other layouts.
-        self.view.eye = (self.view.eye + movement.normalize_or_zero() * dt * 4.4).clamp(
-            center + Vec3::new(-6.35, 0.0, -4.75),
-            center + Vec3::new(6.35, 0.0, 1.35),
-        );
+        let movement = move_direction(input, flat);
+        self.view.eye = if let Some(character) = &mut self.character {
+            character.step(
+                physics,
+                dt,
+                self.view.eye,
+                movement,
+                input.action(InputAction::Jump).pressed,
+            )
+        } else {
+            let center = self.camera.base.translation;
+            // Older ranges have no character component or authored colliders.
+            (self.view.eye + movement * dt * 4.4).clamp(
+                center + Vec3::new(-6.35, 0.0, -4.75),
+                center + Vec3::new(6.35, 0.0, 1.35),
+            )
+        };
         self.camera.pose.translation = self.view.eye;
         self.camera.pose.rotation = self.view.view().rotation;
     }
@@ -282,12 +309,14 @@ impl Range {
         }
     }
 
-    fn shoot(&mut self) -> Option<Uuid> {
+    fn shoot(&mut self, physics: &Physics) -> Option<Uuid> {
         self.status.ammo -= 1;
         self.status.shots += 1;
         self.cooldown = SHOT_INTERVAL;
         let direction = self.view.forward();
-        // shortcut: the firing lanes are open, test scene colliders when adding cover.
+        let clear_distance = physics
+            .raycast(self.view.eye, direction, self.shot_distance, u32::MAX)
+            .map_or(self.shot_distance, |wall| wall.distance);
         let nearest = self
             .drones
             .iter_mut()
@@ -300,6 +329,7 @@ impl Range {
                     drone.actor.pose.translation,
                     radius,
                 )
+                .filter(|distance| *distance < clear_distance)
                 .map(|distance| (distance, drone))
             })
             .min_by(|left, right| left.0.total_cmp(&right.0));
@@ -329,6 +359,41 @@ fn ray_distance(origin: Vec3, direction: Vec3, center: Vec3, radius: f32) -> Opt
 mod tests {
     use super::*;
     use crate::Runtime;
+
+    #[test]
+    fn authored_range_scores_only_if_the_firing_lane_is_clear() {
+        let scene_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/pulse-range/Pulse Range.futty.scene.ron");
+        let mut scene = Scene::load(&scene_file).unwrap();
+        assert!(
+            scene.entities[scene.camera_index(None).unwrap()]
+                .character
+                .is_some()
+        );
+        let fire = |scene: &Scene| {
+            let mut runtime = Runtime::new(scene).unwrap();
+            runtime.game_input(GameInput {
+                range: RangeInput {
+                    active: true,
+                    fire: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            runtime.tick(crate::physics::STEP);
+            runtime.range_status().unwrap()
+        };
+        assert_eq!(fire(&scene).hits, 1);
+        let mut cover = Object::cube("Cover".into(), Vec3::new(0.0, 1.1, 5.0));
+        cover.transform.scale = Vec3::new(2.0, 2.2, 0.4);
+        cover.body = Some(crate::Body {
+            motion: crate::Motion::Fixed,
+            ..Default::default()
+        });
+        scene.entities.push(cover);
+        let blocked = fire(&scene);
+        assert_eq!((blocked.hits, blocked.shots), (0, 1));
+    }
 
     #[test]
     fn round_pauses_hits_nearest_target_reloads_and_restarts() {

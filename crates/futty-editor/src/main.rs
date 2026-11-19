@@ -1,14 +1,18 @@
+mod animation;
 mod assets;
 mod audio;
 mod camera;
 mod context_menu;
 mod document;
 mod external_script;
+mod hud_view;
+mod input;
 mod light;
 mod material;
 mod physics;
 mod player;
 mod prefab;
+mod project;
 mod range_view;
 mod script_editor;
 mod selection;
@@ -49,7 +53,7 @@ fn main() -> eframe::Result {
     let mode = args.get(1).and_then(|arg| arg.to_str());
     if mode == Some("--export") {
         if args.len() != 4 {
-            eprintln!("Usage: futty-editor --export SCENE OUTPUT_FOLDER");
+            eprintln!("Usage: futty-editor --export SCENE_OR_PROJECT OUTPUT_FOLDER");
             std::process::exit(2);
         }
         let result = executable
@@ -77,7 +81,7 @@ fn main() -> eframe::Result {
     let requested_scene = match mode {
         Some("--play" | "--edit") if args.len() == 3 => Some(Path::new(&args[2])),
         Some(flag @ ("--play" | "--edit")) => {
-            eprintln!("Usage: futty-editor {flag} SCENE");
+            eprintln!("Usage: futty-editor {flag} SCENE_OR_PROJECT");
             std::process::exit(2);
         }
         _ => None,
@@ -111,7 +115,11 @@ fn main() -> eframe::Result {
             } else {
                 let mut editor = Editor::new(cc)?;
                 if let Some(path) = scene_to_edit {
-                    editor.open_scene(path.to_path_buf());
+                    if project::is_project(path) {
+                        editor.open_project(path);
+                    } else {
+                        editor.open_scene(path.to_path_buf());
+                    }
                 }
                 Ok(Box::new(editor))
             }
@@ -129,6 +137,7 @@ fn main() -> eframe::Result {
 
 struct Editor {
     doc: Document,
+    project: Option<project::Project>,
     viewport: Viewport,
     dock: egui_stack::DockState<Panel>,
     asset_bytes: HashMap<Uuid, Vec<u8>>,
@@ -140,21 +149,43 @@ struct Editor {
     inspected_asset: Option<InspectedAsset>,
     hierarchy_search: String,
     audio: futty_audio::Audio,
-    play: Option<(Runtime, Camera)>,
+    play: Option<Play>,
     diagnostics: workspace::RunDiagnostics,
     move_tool: bool,
     transform_tool: Option<TransformTool>,
     transform_feedback: Option<(&'static str, String, f64)>,
     scene_rect: Option<egui::Rect>,
-    game_visible: bool,
+    game_rect: Option<egui::Rect>,
     game_aspect: f32,
     range_controls: range_view::RangeControls,
+    input_settings: input::InputSettings,
+    controls_open: bool,
+    hud_open: bool,
+    hud_selection: Option<Uuid>,
+    animation_preview: Option<animation::Preview>,
     camera_preview: Option<Uuid>,
     gpu_label: String,
     gpu_error: Arc<Mutex<Option<String>>>,
     message: String,
     error: bool,
     allow_close: bool,
+}
+
+enum Play {
+    Edited {
+        runtime: Box<Runtime>,
+        camera: Camera,
+    },
+    Loaded(Box<player::GameScene>),
+}
+
+impl Play {
+    fn runtime(&self) -> &Runtime {
+        match self {
+            Self::Edited { runtime, .. } => runtime,
+            Self::Loaded(world) => &world.runtime,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -168,6 +199,7 @@ enum Action {
     Save,
     SaveAs,
     ExportWindows,
+    Project(project::ProjectAction),
     Add(Primitive),
     AddCamera,
     AddLight(LightKind),
@@ -185,6 +217,7 @@ enum Action {
     Focus,
     FrameAll,
     Import,
+    ReimportModel(Uuid),
     Place(Uuid),
     PlaceSprite(Uuid),
     ApplyTexture(Uuid),
@@ -198,6 +231,9 @@ enum Action {
     InspectPrefab(Uuid),
     PlacePrefab(Uuid),
     RemovePrefab(Uuid),
+    EditPrefabSource(Uuid),
+    UnpackPrefab(Uuid),
+    ResetPrefabOverrides(Uuid),
     EditScript(Uuid),
     EditScriptInFutty(Uuid),
     ApplyScriptDraft { clear: bool },
@@ -288,6 +324,7 @@ impl Editor {
         });
         Ok(Self {
             doc: Document::new(Scene::default(), None),
+            project: None,
             viewport: {
                 let mut viewport = Viewport::new(gpu);
                 viewport.transform_settings = cc
@@ -318,9 +355,14 @@ impl Editor {
             transform_tool: None,
             transform_feedback: None,
             scene_rect: None,
-            game_visible: false,
+            game_rect: None,
             game_aspect: 16.0 / 9.0,
             range_controls: range_view::RangeControls::default(),
+            input_settings: input::InputSettings::load(cc.storage),
+            controls_open: false,
+            hud_open: false,
+            hud_selection: None,
+            animation_preview: None,
             camera_preview: None,
             gpu_label,
             gpu_error,
@@ -335,9 +377,41 @@ impl Editor {
         self.error = error;
     }
 
-    fn open_scene(&mut self, path: std::path::PathBuf) {
+    fn transition(&mut self, ctx: &egui::Context, id: &str) {
+        let result = (|| {
+            let project = self
+                .project
+                .as_ref()
+                .ok_or("Open a Futty project to switch scenes")?;
+            let path = project.resolve(id)?;
+            player::GameScene::load(&path, ctx, self.viewport.gpu(), Camera::default())
+        })();
+        match result {
+            Ok(world) => {
+                self.range_controls.release(ctx);
+                self.audio.stop();
+                self.report(format!("Playing {}", world.scene.name), false);
+                self.play = Some(Play::Loaded(Box::new(world)));
+            }
+            Err(error) => {
+                let message = format!("Scene {id:?}: {error}");
+                if let Some(play) = &mut self.play {
+                    match play {
+                        Play::Edited { runtime, .. } => runtime.log_scene_error(message.clone()),
+                        Play::Loaded(world) => world.runtime.log_scene_error(message.clone()),
+                    }
+                }
+                self.report(message, true);
+            }
+        }
+    }
+
+    fn open_scene(&mut self, path: std::path::PathBuf) -> bool {
+        if !self.confirm_close_document() {
+            return false;
+        }
         match Scene::load(&path) {
-            Ok(scene) if self.confirm_close_document() => {
+            Ok(scene) => {
                 let errors = self.install_assets(&scene, &path);
                 if let Some(error) = errors.first() {
                     self.report(
@@ -350,9 +424,12 @@ impl Editor {
                 self.doc = Document::new(scene, Some(path));
                 self.viewport.reset_camera();
                 self.show_panel(Panel::Scene);
+                true
             }
-            Ok(_) => {}
-            Err(error) => self.report(format!("Open failed: {error}"), true),
+            Err(error) => {
+                self.report(format!("Open failed: {error}"), true);
+                false
+            }
         }
     }
 
@@ -421,7 +498,12 @@ impl Editor {
         if (self.doc.dirty() || self.doc.path.is_none()) && !self.save(false) {
             return;
         }
-        let Some(scene) = self.doc.path.as_deref() else {
+        let Some(source) = self
+            .project
+            .as_ref()
+            .map(project::Project::path)
+            .or(self.doc.path.as_deref())
+        else {
             return;
         };
         let Some(parent) = FileDialog::new()
@@ -430,10 +512,11 @@ impl Editor {
         else {
             return;
         };
-        let stem: String = self
-            .doc
-            .scene
-            .name
+        let name = self
+            .project
+            .as_ref()
+            .map_or(self.doc.scene.name.as_str(), project::Project::name);
+        let stem: String = name
             .chars()
             .take(64)
             .map(|ch| {
@@ -447,7 +530,7 @@ impl Editor {
         let output = parent.join(format!("{stem}-Windows"));
         let result = std::env::current_exe()
             .map_err(Into::into)
-            .and_then(|exe| player::export(scene, &output, self.viewport.camera, &exe));
+            .and_then(|exe| player::export(source, &output, self.viewport.camera, &exe));
         match result {
             Ok(()) => self.report(
                 format!(
@@ -492,8 +575,8 @@ impl Editor {
         }
         if matches!(action, Action::PlayStop) {
             self.sync_external_scripts();
-            if let Some((runtime, _)) = self.play.take() {
-                self.diagnostics = workspace::RunDiagnostics::capture(&runtime);
+            if let Some(play) = self.play.take() {
+                self.diagnostics = workspace::RunDiagnostics::capture(play.runtime());
                 self.audio.stop();
                 self.show_panel(Panel::Scene);
                 self.report("Stopped. Edit scene restored.", false);
@@ -504,7 +587,10 @@ impl Editor {
                         self.refresh_scripts();
                         runtime.start_scripts(&self.doc.scene, &self.script_sources());
                         self.script_editor = None;
-                        self.play = Some((runtime, self.viewport.camera));
+                        self.play = Some(Play::Edited {
+                            runtime: Box::new(runtime),
+                            camera: self.viewport.camera,
+                        });
                         self.show_panel(Panel::Game);
                         self.report("Playing a copy of the scene", false);
                     }
@@ -514,6 +600,10 @@ impl Editor {
             return;
         }
         if self.play.is_some() {
+            return;
+        }
+        if let Action::Project(choice) = action {
+            self.project_action(choice);
             return;
         }
         match action {
@@ -541,11 +631,42 @@ impl Editor {
             }
             Action::RemovePrefab(id) => {
                 let before = self.doc.scene.clone();
-                self.doc.scene.prefabs.remove(&id);
+                self.doc.scene.remove_prefab(id);
                 self.doc.record_frame(before, false);
                 if self.inspected_asset == Some(InspectedAsset::Prefab(id)) {
                     self.inspected_asset = None;
                 }
+                return;
+            }
+            Action::EditPrefabSource(id) => {
+                if let Some(source) = self.doc.scene.prefab_source(id) {
+                    let before = self.doc.scene.clone();
+                    if let Some(prefab) = self.doc.scene.prefabs.get_mut(&id) {
+                        prefab.source = Some(source);
+                    }
+                    self.doc.record_frame(before, false);
+                    self.doc.selection.replace(Some(source));
+                    self.inspected_asset = None;
+                    self.script_inspector = false;
+                    self.hierarchy_search.clear();
+                    self.show_panel(Panel::Inspector);
+                    self.show_panel(Panel::Scene);
+                    self.focus_selection();
+                }
+                return;
+            }
+            Action::UnpackPrefab(root) => {
+                let before = self.doc.scene.clone();
+                self.doc.scene.detach_prefab(root);
+                self.doc.record_frame(before, false);
+                self.report("Prefab instance unpacked", false);
+                return;
+            }
+            Action::ResetPrefabOverrides(id) => {
+                let before = self.doc.scene.clone();
+                self.doc.scene.reset_prefab_overrides(id);
+                self.doc.record_frame(before, false);
+                self.report("Prefab overrides reset", false);
                 return;
             }
             Action::ReparentSelection(parent) => {
@@ -675,6 +796,7 @@ impl Editor {
             }
             Action::FrameAll => self.frame_objects(true),
             Action::Import => self.import_dialog(),
+            Action::ReimportModel(id) => self.reimport_model(id),
             Action::Place(id) => {
                 self.inspected_asset = None;
                 self.place_model(id);
@@ -772,8 +894,18 @@ impl Editor {
                 self.report("Audio preview stopped", false);
             }
             Action::RemoveAsset(id) => {
-                self.doc.scene.assets.retain(|asset| asset.id != id);
-                self.doc.scene.script_sources.remove(&id);
+                if self
+                    .doc
+                    .scene
+                    .hud
+                    .iter()
+                    .any(|widget| widget.image == Some(id))
+                {
+                    self.report("The asset is used by a HUD image", true);
+                } else {
+                    self.doc.scene.assets.retain(|asset| asset.id != id);
+                    self.doc.scene.script_sources.remove(&id);
+                }
             }
             _ => {}
         }
@@ -902,9 +1034,15 @@ impl Editor {
                         menu_item(ui, "Save Scene     Ctrl+S", Action::Save, true, action);
                         menu_item(ui, "Save Scene As…", Action::SaveAs, true, action);
                         ui.separator();
+                        self.project_menu(ui, action);
+                        ui.separator();
                         menu_item(
                             ui,
-                            "Export Windows Game…",
+                            if self.project.is_some() {
+                                "Export Windows Project…"
+                            } else {
+                                "Export Windows Game…"
+                            },
                             Action::ExportWindows,
                             cfg!(target_os = "windows"),
                             action,
@@ -944,6 +1082,16 @@ impl Editor {
                 });
                 ui.menu_button("Window", |ui| {
                     workspace::panels_menu(ui, action);
+                    ui.separator();
+                    if ui.button("Game HUD").clicked() {
+                        self.hud_open = true;
+                        self.show_panel(Panel::Game);
+                        ui.close();
+                    }
+                    if ui.button("Game Controls     F10").clicked() {
+                        self.controls_open = true;
+                        ui.close();
+                    }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.menu_button("Layout", |ui| {
@@ -1200,16 +1348,75 @@ impl Editor {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.push_id(object.uuid, |ui| {
                 ui.add_enabled_ui(self.play.is_none(), |ui| {
+                    if let Some(link) = object.prefab
+                        && let Some(prefab) = self.doc.scene.prefabs.get(&link.asset)
+                    {
+                        ui.label(format!("Prefab · {}", prefab.name));
+                        ui.horizontal(|ui| {
+                            if ui.button("Inspect Prefab").clicked() {
+                                *action = Some(Action::InspectPrefab(link.asset));
+                            }
+                            if ui.button("Unpack").clicked() {
+                                *action = Some(Action::UnpackPrefab(link.instance));
+                            }
+                        });
+                        if link.has_overrides() && ui.button("Reset Overrides").clicked() {
+                            *action = Some(Action::ResetPrefabOverrides(object.uuid));
+                        }
+                        ui.separator();
+                    } else if self
+                        .doc
+                        .scene
+                        .prefabs
+                        .values()
+                        .any(|prefab| prefab.source == Some(object.uuid))
+                    {
+                        ui.label(RichText::new("Prefab source").color(MUTED));
+                    }
                     ui.label("Name");
                     ui.add(
                         egui::TextEdit::singleline(&mut object.name).desired_width(f32::INFINITY),
                     );
+                    ui.label("Tags");
+                    let tag_id = ui.make_persistent_id(("object-tags", object.uuid));
+                    let mut text = ui
+                        .data(|data| data.get_temp::<String>(tag_id))
+                        .unwrap_or_else(|| object.tags.join(", "));
+                    let tag_field = ui.add(
+                        egui::TextEdit::singleline(&mut text)
+                            .id(tag_id)
+                            .hint_text("Comma-separated tags")
+                            .desired_width(f32::INFINITY),
+                    );
+                    if tag_field.changed() {
+                        let mut seen = std::collections::HashSet::new();
+                        object.tags = text
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|tag| {
+                                !tag.is_empty()
+                                    && tag.len() <= 64
+                                    && !tag.chars().any(char::is_control)
+                                    && seen.insert(*tag)
+                            })
+                            .take(32)
+                            .map(str::to_owned)
+                            .collect();
+                    }
+                    let editing_tags = tag_field.has_focus();
+                    ui.data_mut(|data| {
+                        if editing_tags {
+                            data.insert_temp(tag_id, text);
+                        } else {
+                            data.remove_temp::<String>(tag_id);
+                        }
+                    });
                     let parent_name = parent_choices
                         .iter()
                         .find(|(id, _)| Some(*id) == object.parent)
                         .map_or("Scene root", |(_, name)| name.as_str());
                     ui.label("Parent");
-                    ui.add_enabled_ui(object.body.is_none(), |ui| {
+                    ui.add_enabled_ui(object.body.is_none() && object.character.is_none(), |ui| {
                         let mut parent = object.parent;
                         egui::ComboBox::from_id_salt("object-parent")
                             .width(ui.available_width())
@@ -1280,6 +1487,14 @@ impl Editor {
                             .find(|asset| Some(asset.id) == object.mesh)
                             .map_or(object.primitive.label(), |asset| asset.name.as_str());
                         ui.label(format!("Mesh  ·  {mesh}"));
+                        if let Some(mesh) = object.mesh {
+                            animation::inspector(
+                                ui,
+                                object,
+                                self.viewport.clips(mesh),
+                                &mut self.animation_preview,
+                            );
+                        }
                         material::selector(ui, object, materials, action);
                         ui.add_enabled_ui(object.material.is_none(), |ui| {
                             let texture = assets
@@ -1351,6 +1566,23 @@ impl Editor {
         if !game {
             self.scene_camera_controls(ui, action, playing, modal);
         }
+        if game && let Some(Play::Loaded(world)) = &mut self.play {
+            ui.label(format!("Playing {}", world.scene.name));
+            let size = ui.available_size();
+            if size.x >= 2.0 && size.y >= 2.0 {
+                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                self.game_rect = Some(rect);
+                self.game_aspect = rect.aspect_ratio();
+                world.paint(
+                    ui,
+                    &response,
+                    &mut self.range_controls,
+                    &self.input_settings,
+                    !modal && !self.controls_open && !self.hud_open,
+                );
+            }
+            return;
+        }
         let scene = &self.doc.scene;
         let camera_index = if game {
             scene.camera_index(if playing { None } else { self.camera_preview })
@@ -1377,7 +1609,7 @@ impl Editor {
         }
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         if game {
-            self.game_visible = true;
+            self.game_rect = Some(rect);
             self.game_aspect = rect.aspect_ratio();
         } else {
             self.scene_rect = Some(rect);
@@ -1418,40 +1650,89 @@ impl Editor {
         let mut camera = self.viewport.camera;
         if game
             && camera_index.is_none()
-            && let Some((_, play_camera)) = &mut self.play
+            && let Some(Play::Edited {
+                camera: play_camera,
+                ..
+            }) = &mut self.play
         {
             *play_camera = self.viewport.navigate(&response, *play_camera);
             camera = *play_camera;
         }
-        let objects = &self.doc.scene.entities;
+        let scene = &self.doc.scene;
+        let objects = &scene.entities;
         let preview = self
             .transform_tool
             .as_ref()
             .filter(|_| !playing)
             .map(|tool| &tool.preview);
         let selected = if game { &[] } else { self.doc.selection.ids() };
-        let frame = player::draw_objects(
+        let runtime = match &mut self.play {
+            Some(Play::Edited { runtime, .. }) => Some(runtime.as_mut()),
+            _ => None,
+        };
+        let mut frame = player::draw_objects(
             &self.doc.scene,
             &hierarchy,
-            self.play.as_mut().map(|(runtime, _)| runtime),
+            runtime,
             camera,
             camera_index,
             selected,
             preview,
         );
+        if !playing
+            && let Some(preview) = &self.animation_preview
+            && self.doc.selection.primary() == Some(preview.object)
+            && let Some((index, object)) = objects
+                .iter()
+                .filter(|object| object.has_renderer())
+                .enumerate()
+                .find(|(_, object)| object.uuid == preview.object)
+            && let Some(sample) = preview.sample(object.animation)
+        {
+            frame.instances[index].animation = Some(sample);
+        }
         self.viewport.render(
             ui,
             rect,
             frame.render_scene(rect.aspect_ratio(), self.doc.scene.sky),
             game,
         );
-        if game
-            && let Some(status) = self
+        if game {
+            let interactive = !modal
+                && !self.controls_open
+                && !self.hud_open
+                && self.range_controls.cursor_free();
+            let runtime = match &mut self.play {
+                Some(Play::Edited { runtime, .. }) => Some(runtime.as_mut()),
+                _ => None,
+            };
+            hud_view::paint(
+                ui,
+                rect,
+                scene,
+                &mut self.viewport,
+                Some(&self.asset_bytes),
+                runtime,
+                interactive,
+            );
+            if let Some(status) = self
                 .play
                 .as_ref()
-                .and_then(|(runtime, _)| runtime.range_status())
-        {
-            self.range_controls.paint(ui, &response, status);
+                .and_then(|play| play.runtime().range_status())
+            {
+                let capture = !modal
+                    && !self.controls_open
+                    && !self.hud_open
+                    && !hud_view::over_button(ui.ctx(), rect, &scene.hud);
+                self.range_controls.paint(
+                    ui,
+                    &response,
+                    status,
+                    &self.input_settings,
+                    scene.hud.is_empty(),
+                    capture,
+                );
+            }
         }
         if game && (!playing || camera_index.is_some()) {
             return;
@@ -1617,6 +1898,7 @@ impl Editor {
 
 impl eframe::App for Editor {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.input_settings.save(storage);
         eframe::set_value(storage, workspace::STORAGE_KEY, &self.dock);
         eframe::set_value(
             storage,
@@ -1659,6 +1941,28 @@ impl eframe::App for Editor {
             }
         }
         if ctx.current_pass_index() == 0 {
+            input::InputSettings::toggle_shortcut(&ctx, &mut self.controls_open);
+            if self.play.is_none()
+                && let Some(preview) = &mut self.animation_preview
+            {
+                if self.doc.selection.primary() != Some(preview.object) {
+                    self.animation_preview = None;
+                } else if let Some(object) = self
+                    .doc
+                    .scene
+                    .entities
+                    .iter()
+                    .find(|object| object.uuid == preview.object)
+                    && let Some(mesh) = object.mesh
+                    && preview.tick(
+                        ctx.input(|input| input.stable_dt),
+                        object,
+                        self.viewport.clips(mesh),
+                    )
+                {
+                    ctx.request_repaint();
+                }
+            }
             let mut audio_issue = self.audio.update();
             if self.audio.preview_active() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(150));
@@ -1666,17 +1970,37 @@ impl eframe::App for Editor {
             let is_range = self
                 .play
                 .as_ref()
-                .is_some_and(|(runtime, _)| runtime.range_status().is_some());
-            let range = self
-                .range_controls
-                .input(&ctx, is_range && self.game_visible);
-            if let Some((runtime, _)) = &mut self.play {
-                let (dt, mut keys) =
-                    player::game_input(&ctx, self.game_visible && (!is_range || range.active));
-                keys.range = range;
+                .is_some_and(|play| play.runtime().range_status().is_some());
+            let game = self
+                .game_rect
+                .filter(|_| !self.controls_open && !self.hud_open);
+            let hud = match &self.play {
+                Some(Play::Loaded(world)) => &world.scene.hud,
+                _ => &self.doc.scene.hud,
+            };
+            let hud_blocks_mouse = self.range_controls.cursor_free()
+                && game.is_some_and(|rect| hud_view::over_button(&ctx, rect, hud));
+            let (dt, keys) = self.range_controls.input(
+                &ctx,
+                game,
+                is_range,
+                &self.input_settings,
+                hud_blocks_mouse,
+            );
+            if let Some(play) = &mut self.play {
+                let (runtime, audio) = match play {
+                    Play::Edited { runtime, .. } => (runtime.as_mut(), &mut self.audio),
+                    Play::Loaded(world) => {
+                        audio_issue = audio_issue.or(world.audio.update());
+                        (&mut world.runtime, &mut world.audio)
+                    }
+                };
                 runtime.game_input(keys);
                 runtime.tick(dt);
-                audio_issue = audio_issue.or(audio::pump(&mut self.audio, runtime));
+                audio_issue = audio_issue.or(audio::pump(audio, runtime));
+                if let Some(id) = runtime.take_scene_request() {
+                    self.transition(&ctx, &id);
+                }
                 ctx.request_repaint();
             }
             if let Some(error) = audio_issue {
@@ -1752,10 +2076,12 @@ impl eframe::App for Editor {
                 })
             });
         self.scene_rect = None;
-        self.game_visible = false;
+        self.game_rect = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BACKGROUND))
             .show(ui, |ui| self.dock_workspace(ui, &mut action, modal));
+        self.input_settings.window(&ctx, &mut self.controls_open);
+        self.hud_window(&ctx);
         self.doc.record_frame(
             before,
             ctx.egui_is_using_pointer() && ctx.input(|input| input.pointer.primary_down()),
@@ -1763,6 +2089,9 @@ impl eframe::App for Editor {
         if !modal && let Some(action) = action.or_else(|| self.shortcut(&ctx)) {
             self.execute(action);
             ctx.request_repaint();
+        }
+        if let Some(error) = self.doc.prefab_error.take() {
+            self.report(format!("Prefab update failed: {error}"), true);
         }
     }
 }

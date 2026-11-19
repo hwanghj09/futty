@@ -1,7 +1,7 @@
 use std::{collections::HashMap, ops::Range};
 
 use bytemuck::{Pod, Zeroable};
-use futty_assets::{Model, Part, Vertex};
+use futty_assets::{AnimationSample, Clip, Model, Part, Rig, Vertex};
 use futty_core::{Light, LightKind, Primitive, Surface};
 use glam::{Mat4, Vec3};
 use uuid::Uuid;
@@ -81,6 +81,7 @@ pub struct DrawObject {
     pub sprite: bool,
     pub surface: Surface,
     pub material_override: bool,
+    pub animation: Option<AnimationSample>,
 }
 
 pub const MAX_LIGHTS: usize = 8;
@@ -237,12 +238,25 @@ struct GpuModel {
     parts: Vec<Part>,
     textures: Vec<gpu::BindGroup>,
     bounds: [Vec3; 2],
+    rig: Option<Rig>,
 }
 
 struct Draw<'a> {
     buffers: &'a MeshBuffers,
     indices: Range<u32>,
     texture: &'a gpu::BindGroup,
+    deformed: Option<gpu::BufferSlice<'a>>,
+}
+
+impl Draw<'_> {
+    fn bind(&self, pass: &mut gpu::RenderPass<'_>) {
+        pass.set_vertex_buffer(
+            0,
+            self.deformed
+                .unwrap_or_else(|| self.buffers.vertices.slice(..)),
+        );
+        pass.set_index_buffer(self.buffers.indices.slice(..), gpu::IndexFormat::Uint32);
+    }
 }
 
 pub struct Renderer {
@@ -260,6 +274,7 @@ pub struct Renderer {
     models: HashMap<Uuid, GpuModel>,
     textures: HashMap<Uuid, (gpu::BindGroup, [u32; 2])>,
     instances: gpu::Buffer,
+    animation_vertices: gpu::Buffer,
     grid: Vec<Instance>,
 }
 
@@ -433,6 +448,7 @@ impl Renderer {
             models: HashMap::new(),
             textures: HashMap::new(),
             instances,
+            animation_vertices: Self::animation_buffer(device, size_of::<Vertex>() as u64),
             grid,
         }
     }
@@ -471,6 +487,7 @@ impl Renderer {
                 textures,
                 parts: model.parts,
                 bounds: model.bounds,
+                rig: model.rig,
             },
         );
     }
@@ -503,6 +520,13 @@ impl Renderer {
         self.textures.get(&id).map(|(_, size)| *size)
     }
 
+    pub fn clips(&self, model: Uuid) -> &[Clip] {
+        self.models
+            .get(&model)
+            .and_then(|model| model.rig.as_ref())
+            .map_or(&[], Rig::clips)
+    }
+
     pub fn bounds(&self, mesh: Option<Uuid>, primitive: Primitive) -> [Vec3; 2] {
         mesh.and_then(|id| self.models.get(&id)).map_or_else(
             || {
@@ -525,6 +549,56 @@ impl Renderer {
         })
     }
 
+    fn animation_buffer(device: &gpu::Device, size: u64) -> gpu::Buffer {
+        device.create_buffer(&gpu::BufferDescriptor {
+            label: Some("Animated mesh vertices"),
+            size,
+            usage: gpu::BufferUsages::VERTEX | gpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn animate_objects(
+        &mut self,
+        device: &gpu::Device,
+        queue: &gpu::Queue,
+        objects: &[DrawObject],
+    ) -> HashMap<usize, Range<u64>> {
+        // shortcut: deform up to one million vertices per view on the CPU, move skinning to the GPU for larger scenes.
+        let stride = size_of::<Vertex>() as u64;
+        let capacity = device.limits().max_buffer_size.min(1_000_000 * stride);
+        let mut vertices = Vec::new();
+        let mut ranges = HashMap::new();
+        for (index, object) in objects.iter().enumerate() {
+            let Some(sample) = object.animation else {
+                continue;
+            };
+            let Some(rig) = object
+                .mesh
+                .and_then(|id| self.models.get(&id))
+                .and_then(|model| model.rig.as_ref())
+            else {
+                continue;
+            };
+            let start = vertices.len();
+            if (start + rig.vertex_count()) as u64 * stride <= capacity
+                && rig.sample(sample, &mut vertices)
+            {
+                ranges.insert(index, start as u64 * stride..vertices.len() as u64 * stride);
+            }
+        }
+        let bytes = bytemuck::cast_slice(&vertices);
+        if !bytes.is_empty() {
+            let size = bytes.len() as u64;
+            if self.animation_vertices.size() < size {
+                self.animation_vertices =
+                    Self::animation_buffer(device, size.next_power_of_two().min(capacity));
+            }
+            queue.write_buffer(&self.animation_vertices, 0, bytes);
+        }
+        ranges
+    }
+
     pub fn draw(
         &mut self,
         device: &gpu::Device,
@@ -539,12 +613,14 @@ impl Renderer {
             grid: show_grid,
             ..
         } = scene;
+        let animated = self.animate_objects(device, queue, objects);
         let grid = if show_grid { self.grid.as_slice() } else { &[] };
         let mut instances = grid.to_vec();
         let mut draws = Vec::new();
-        for object in objects
+        for (index, object) in objects
             .iter()
-            .filter(|object| !object.sprite && object.matrix.is_finite())
+            .enumerate()
+            .filter(|(_, object)| !object.sprite && object.matrix.is_finite())
         {
             let replacement = object
                 .texture
@@ -576,6 +652,9 @@ impl Renderer {
                         buffers: &model.buffers,
                         indices: part.indices.clone(),
                         texture,
+                        deformed: animated
+                            .get(&index)
+                            .map(|range| self.animation_vertices.slice(range.clone())),
                     });
                 }
             } else {
@@ -601,6 +680,7 @@ impl Renderer {
                     buffers,
                     indices: 0..*count,
                     texture: replacement.unwrap_or(&self.white),
+                    deformed: None,
                 });
             }
         }
@@ -635,6 +715,7 @@ impl Renderer {
                 buffers: &self.quad,
                 indices: 0..6,
                 texture: texture.unwrap_or(&self.white),
+                deformed: None,
             });
         }
         if (instances.len() * size_of::<Instance>()) as u64 > self.instances.size() {
@@ -701,7 +782,7 @@ impl Renderer {
                 if index == first_sprite {
                     pass.set_pipeline(&self.sprite_pipeline);
                 }
-                draw.buffers.bind(&mut pass);
+                draw.bind(&mut pass);
                 pass.set_bind_group(1, draw.texture, &[]);
                 let index = (grid.len() + index) as u32;
                 pass.draw_indexed(draw.indices, 0, index..index + 1);
@@ -889,6 +970,7 @@ mod tests {
             primitive: Primitive::Cube,
             surface: Surface::default(),
             material_override: true,
+            animation: None,
         };
         let with_cube = draw(camera, &[cube]);
         assert_eq!(&with_cube[top..top + 4], &level[top..top + 4]);
@@ -923,6 +1005,7 @@ mod tests {
             primitive: Primitive::Cube,
             surface: Surface::default(),
             material_override: true,
+            animation: None,
         };
         let sun = LightInstance {
             light: Light::new(LightKind::Directional),
@@ -986,6 +1069,7 @@ mod tests {
         let cube = DrawObject {
             surface: Surface::default(),
             material_override: false,
+            animation: None,
             matrix: Mat4::IDENTITY,
             color: [0.24; 3],
             selected: false,
@@ -1057,6 +1141,7 @@ mod tests {
         let object = |matrix, primitive| DrawObject {
             surface: Surface::default(),
             material_override: false,
+            animation: None,
             matrix,
             color: [0.5; 3],
             selected: false,
@@ -1138,6 +1223,7 @@ mod tests {
         let sprite = DrawObject {
             surface: Surface::default(),
             material_override: false,
+            animation: None,
             matrix: Mat4::IDENTITY,
             color: [1.0; 3],
             selected: false,
@@ -1167,6 +1253,7 @@ mod tests {
         let solid = DrawObject {
             surface: Surface::default(),
             material_override: false,
+            animation: None,
             matrix: Mat4::from_translation(Vec3::Z * 0.75),
             color: [0.0, 0.0, 1.0],
             selected: false,
@@ -1215,6 +1302,7 @@ mod tests {
         let mut object = DrawObject {
             surface: Surface::default(),
             material_override: false,
+            animation: None,
             matrix: Mat4::IDENTITY,
             color: [1.0; 3],
             selected: false,

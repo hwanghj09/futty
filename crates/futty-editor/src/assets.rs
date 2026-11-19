@@ -53,6 +53,44 @@ impl Editor {
         }
     }
 
+    pub(crate) fn reimport_model(&mut self, id: Uuid) {
+        let Some(asset) = self
+            .doc
+            .scene
+            .assets
+            .iter()
+            .find(|asset| asset.id == id && asset.kind == AssetKind::Model)
+        else {
+            return;
+        };
+        let Some(source) = FileDialog::new()
+            .set_title(format!("Reimport {}", asset.name))
+            .add_filter("GLB model", &["glb"])
+            .pick_file()
+        else {
+            return;
+        };
+        let result = (|| {
+            let bytes = futty_assets::read(&source)?;
+            let model = replacement_model(&self.doc.scene, id, &bytes)?;
+            if let Some(scene) = self.doc.saved_asset_path(id) {
+                let expected = self.asset_bytes.get(&id).map(Vec::as_slice);
+                futty_assets::replace_saved_model(scene, asset, expected, &bytes)?;
+            }
+            Ok::<_, Box<dyn std::error::Error>>((bytes, model))
+        })();
+        match result {
+            Ok((bytes, model)) => {
+                let message = format!("Reimported {}", asset.name);
+                self.viewport.upload_model(id, model);
+                self.asset_bytes.insert(id, bytes);
+                self.animation_preview = None;
+                self.report(message, false);
+            }
+            Err(error) => self.report(format!("Reimport failed: {error}"), true),
+        }
+    }
+
     pub(crate) fn install_assets(&mut self, scene: &Scene, path: &Path) -> Vec<String> {
         self.clear_assets();
         let mut errors = Vec::new();
@@ -77,6 +115,7 @@ impl Editor {
         self.inspected_asset = None;
         self.hierarchy_search.clear();
         self.camera_preview = None;
+        self.animation_preview = None;
         self.diagnostics = workspace::RunDiagnostics::default();
         self.script_editor = None;
         self.external_scripts.clear();
@@ -316,6 +355,9 @@ impl Editor {
             ),
         };
         menu_item(ui, label, asset_primary_action(asset), enabled, action);
+        if asset.kind == AssetKind::Model {
+            menu_item(ui, "Reimport GLB…", Action::ReimportModel(id), edit, action);
+        }
         if asset.kind == AssetKind::Script {
             menu_item(
                 ui,
@@ -349,7 +391,13 @@ impl Editor {
                     && object.sprite.is_none_or(|sprite| sprite.texture != id)
                     && object.script != Some(id)
                     && object.audio_source.is_none_or(|source| source.clip != id)
-            });
+            })
+            && self
+                .doc
+                .scene
+                .hud
+                .iter()
+                .all(|widget| widget.image != Some(id));
         ui.separator();
         menu_item(
             ui,
@@ -361,11 +409,99 @@ impl Editor {
     }
 }
 
+fn replacement_model(
+    scene: &Scene,
+    id: Uuid,
+    bytes: &[u8],
+) -> futty_assets::AssetResult<futty_assets::Model> {
+    let model = futty_assets::model(bytes)?;
+    let clips = model.rig.as_ref().map_or(&[][..], futty_assets::Rig::clips);
+    if let Some((name, clip)) = scene
+        .referenced_objects()
+        .filter_map(|object| {
+            (object.mesh == Some(id))
+                .then_some(object.animation)
+                .flatten()
+                .map(|animation| (object.name.as_str(), animation.clip))
+        })
+        .find(|(_, index)| !clips.iter().any(|clip| clip.index == *index))
+    {
+        return Err(format!(
+            "{name} uses animation clip {clip}, which is missing from the replacement GLB"
+        )
+        .into());
+    }
+    Ok(model)
+}
+
 fn asset_primary_action(asset: &Asset) -> Action {
     match asset.kind {
         AssetKind::Model => Action::Place(asset.id),
         AssetKind::Texture => Action::PlaceSprite(asset.id),
         AssetKind::Script => Action::EditScript(asset.id),
         AssetKind::Wav | AssetKind::Ogg => Action::PreviewAudio(asset.id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CRATE: &[u8] = include_bytes!("../../../examples/asset-preview/Workshop Crate.glb");
+    const BOT: &[u8] = include_bytes!(
+        "../../../examples/animation-playground/Assets/Futty/6c5cb6d0-3ec5-4142-8af3-368c0c033dde.glb"
+    );
+
+    #[test]
+    fn model_reimport_keeps_persisted_scene_and_prefab_references() -> futty_assets::AssetResult<()>
+    {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("reimport.futty.scene.ron");
+        let mut scene = Scene::default();
+        let asset = Asset {
+            id: Uuid::new_v4(),
+            name: "Original label".into(),
+            kind: AssetKind::Model,
+        };
+        scene.entities[0].mesh = Some(asset.id);
+        scene.assets.push(asset.clone());
+        let prefab = scene.create_prefab(scene.entities[0].uuid)?;
+        scene.instantiate_prefab(prefab, Vec3::X)?;
+        futty_assets::save(&path, &asset, CRATE)?;
+        scene.save(&path)?;
+        let before = std::fs::read(&path)?;
+
+        let updated = replacement_model(&scene, asset.id, BOT)?;
+        assert_eq!(updated.rig.unwrap().clips().len(), 3);
+        futty_assets::replace_saved_model(&path, &asset, Some(CRATE), BOT)?;
+        assert_eq!(std::fs::read(&path)?, before);
+        assert_eq!(Scene::load(&path)?, scene);
+        assert_eq!(futty_assets::read_saved(&path, &asset)?, BOT);
+        assert!(futty_assets::replace_saved_model(&path, &asset, Some(CRATE), CRATE).is_err());
+        futty_assets::replace_saved_model(&path, &asset, Some(CRATE), BOT)?;
+        assert_eq!(futty_assets::read_saved(&path, &asset)?, BOT);
+        futty_assets::save(&path, &asset, BOT)?;
+
+        scene.prefabs.get_mut(&prefab).unwrap().entities[0].animation =
+            Some(futty_runtime::Animation::default());
+        assert!(replacement_model(&scene, asset.id, CRATE).is_err());
+        assert!(replacement_model(&scene, asset.id, b"not a GLB").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn model_reimport_can_repair_a_saved_missing_asset() -> futty_assets::AssetResult<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("missing.ron");
+        let asset = Asset {
+            id: Uuid::new_v4(),
+            name: "Model".into(),
+            kind: AssetKind::Model,
+        };
+        assert!(futty_assets::read_saved(&path, &asset).is_err());
+        futty_assets::replace_saved_model(&path, &asset, None, CRATE)?;
+        assert_eq!(futty_assets::read_saved(&path, &asset)?, CRATE);
+        assert!(futty_assets::replace_saved_model(&path, &asset, None, BOT).is_err());
+        Ok(())
     }
 }

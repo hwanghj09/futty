@@ -2,21 +2,27 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     fs, io,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
-use eframe::egui;
+use eframe::{egui, egui_wgpu::RenderState};
 use futty_audio::Audio;
 use futty_core::{
     Asset, AssetKind, Camera, CameraLens, CameraView, LightKind, Projection, Transform,
 };
 use futty_render::{DrawObject, LightInstance, MAX_LIGHTS, RenderScene};
-use futty_runtime::{GameInput, Hierarchy, Runtime, Scene};
+use futty_runtime::{Hierarchy, Runtime, Scene};
 use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{audio, range_view::RangeControls, viewport::Viewport};
+use crate::{
+    audio, hud_view,
+    input::InputSettings,
+    project::{self, Project, SceneList},
+    range_view::RangeControls,
+    viewport::Viewport,
+};
 
 pub(crate) const MANIFEST: &str = "game.futty.build.ron";
 const SCENE: &str = "game.futty.scene.ron";
@@ -26,6 +32,8 @@ const FORMAT: u32 = 1;
 struct Launch {
     format: u32,
     camera: Camera,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project: Option<SceneList>,
 }
 
 pub(crate) fn export(
@@ -37,19 +45,60 @@ pub(crate) fn export(
     if destination.try_exists()? {
         return Err("Choose a new output folder. The destination already exists.".into());
     }
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let stage = tempfile::Builder::new()
+        .prefix(".futty-build-")
+        .tempdir_in(parent)?;
+    let project = if project::is_project(source) {
+        let project = Project::load(source)?;
+        let mut list = project.list().clone();
+        for (index, (id, entry)) in list.scenes.iter_mut().enumerate() {
+            let folder = format!("Scenes/{index}");
+            fs::create_dir_all(stage.path().join(&folder))?;
+            *entry = format!("{folder}/{SCENE}");
+            copy_scene(&project.resolve(id)?, &stage.path().join(&*entry))
+                .map_err(|error| format!("Scene {id}: {error}"))?;
+        }
+        Some(list)
+    } else {
+        copy_scene(source, &stage.path().join(SCENE))?;
+        None
+    };
+    let launch = Launch {
+        format: if project.is_some() { 2 } else { FORMAT },
+        camera,
+        project,
+    };
+    fs::write(stage.path().join(MANIFEST), ron::to_string(&launch)?)?;
+    fs::copy(executable, stage.path().join("Game.exe"))?;
+    fs::rename(stage.path(), destination)?;
+    Ok(())
+}
+
+fn copy_scene(source: &Path, entry: &Path) -> Result<(), Box<dyn Error>> {
     let mut scene = Scene::load(source)?;
-    scene.prefabs.clear();
+    for object in &mut scene.entities {
+        object.prefab = None;
+    }
+    if scene.entities.iter().all(|object| object.script.is_none()) {
+        scene.prefabs.clear();
+    } else {
+        for prefab in scene.prefabs.values_mut() {
+            prefab.source = None;
+        }
+    }
     let referenced_materials: HashSet<_> = scene
-        .entities
-        .iter()
+        .referenced_objects()
         .filter_map(|object| object.material)
         .collect();
     scene
         .materials
         .retain(|id, _| referenced_materials.contains(id));
     let mut used: HashSet<_> = scene
-        .entities
-        .iter()
+        .referenced_objects()
         .flat_map(|object| {
             [
                 object.mesh,
@@ -68,16 +117,9 @@ pub(crate) fn export(
             .values()
             .filter_map(|material| material.texture),
     );
+    used.extend(scene.hud.iter().filter_map(|widget| widget.image));
     scene.assets.retain(|asset| used.contains(&asset.id));
     scene.script_sources.retain(|id, _| used.contains(id));
-    let parent = destination
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let stage = tempfile::Builder::new()
-        .prefix(".futty-build-")
-        .tempdir_in(parent)?;
-    let entry = stage.path().join(SCENE);
     let mut audio = Audio::default();
     for asset in &scene.assets {
         if let Some(source_code) = scene.script_sources.get(&asset.id) {
@@ -88,17 +130,9 @@ pub(crate) fn export(
             .map_err(|error| format!("{}: {error}", asset.name))?;
         validate_asset(asset, &bytes, &mut audio)
             .map_err(|error| format!("{}: {error}", asset.name))?;
-        futty_assets::save(&entry, asset, &bytes)?;
+        futty_assets::save(entry, asset, &bytes)?;
     }
-    scene.save(&entry)?;
-    let launch = Launch {
-        format: FORMAT,
-        camera,
-    };
-    fs::write(stage.path().join(MANIFEST), ron::to_string(&launch)?)?;
-    fs::copy(executable, stage.path().join("Game.exe"))?;
-    fs::rename(stage.path(), destination)?;
-    Ok(())
+    scene.save(entry)
 }
 
 fn validate_asset(asset: &Asset, bytes: &[u8], audio: &mut Audio) -> Result<(), Box<dyn Error>> {
@@ -119,34 +153,6 @@ fn check_script(asset: &Asset, source: &str) -> Result<(), Box<dyn Error>> {
     futty_runtime::inspect_script(source)
         .map(|_| ())
         .map_err(|error| format!("{}: {error}", asset.name).into())
-}
-
-pub(crate) fn game_input(ctx: &egui::Context, enabled: bool) -> (f32, GameInput) {
-    ctx.input(|input| {
-        let down = |key| {
-            enabled
-                && input.focused
-                && !input.pointer.secondary_down()
-                && !input.modifiers.command
-                && input.key_down(key)
-        };
-        (
-            input.stable_dt,
-            GameInput {
-                forward: down(egui::Key::W),
-                backward: down(egui::Key::S),
-                left: down(egui::Key::A),
-                right: down(egui::Key::D),
-                held: egui::Key::ALL
-                    .iter()
-                    .copied()
-                    .filter(|&key| down(key))
-                    .map(egui::Key::name)
-                    .collect(),
-                range: Default::default(),
-            },
-        )
-    })
 }
 
 pub(crate) struct SceneFrame {
@@ -191,14 +197,30 @@ pub(crate) fn draw_objects(
     selected: &[Uuid],
     preview: Option<&HashMap<Uuid, Transform>>,
 ) -> SceneFrame {
-    let state: HashMap<_, _> = runtime.map_or_else(HashMap::new, |runtime| {
-        runtime
-            .extract()
-            .map(|(id, transform, color)| (id, (transform, color)))
-            .collect()
-    });
-    let local: Vec<_> = scene
-        .entities
+    let (state, animations, spawned) = runtime.map_or_else(
+        || (HashMap::new(), HashMap::new(), &[][..]),
+        |runtime| {
+            let state = runtime
+                .extract()
+                .map(|(id, transform, color)| (id, (transform, color)))
+                .collect();
+            let animations = runtime.animated_objects().collect::<HashMap<_, _>>();
+            (state, animations, runtime.spawned_objects())
+        },
+    );
+    let mut combined = Vec::new();
+    let mut combined_hierarchy = None;
+    if !spawned.is_empty() {
+        combined.extend_from_slice(&scene.entities);
+        combined.extend_from_slice(spawned);
+        combined_hierarchy = Hierarchy::new(&combined).ok();
+    }
+    let (objects, hierarchy) = combined_hierarchy
+        .as_ref()
+        .map_or((&scene.entities, hierarchy), |hierarchy| {
+            (&combined, hierarchy)
+        });
+    let local: Vec<_> = objects
         .iter()
         .map(|object| {
             preview
@@ -211,8 +233,7 @@ pub(crate) fn draw_objects(
     let view = camera_index
         .and_then(|index| scene.camera_view(index, hierarchy, &world, &local))
         .unwrap_or_else(|| camera.view());
-    let instances = scene
-        .entities
+    let instances = objects
         .iter()
         .zip(&world)
         .filter(|(object, _)| object.has_renderer())
@@ -246,11 +267,19 @@ pub(crate) fn draw_objects(
                 surface: material.map_or_else(Default::default, |material| material.surface),
                 material_override: material.is_some(),
                 sprite: object.sprite.is_some(),
+                animation: animations
+                    .get(&object.uuid)
+                    .copied()
+                    .or_else(|| object.animation.map(|animation| (animation, 0.0)))
+                    .map(|(animation, seconds)| futty_assets::AnimationSample {
+                        clip: animation.clip,
+                        seconds,
+                        looping: animation.looping,
+                    }),
             }
         })
         .collect();
-    let lights = scene
-        .entities
+    let lights = objects
         .iter()
         .enumerate()
         .filter_map(|(index, object)| {
@@ -279,12 +308,12 @@ pub(crate) fn draw_objects(
 }
 
 pub(crate) struct Player {
-    scene: Scene,
-    hierarchy: Hierarchy,
-    runtime: Runtime,
-    audio: Audio,
-    viewport: Viewport,
+    world: GameScene,
+    project: Option<(PathBuf, SceneList)>,
+    scene_error: Option<String>,
     range_controls: RangeControls,
+    input_settings: InputSettings,
+    controls_open: bool,
 }
 
 impl Player {
@@ -299,34 +328,117 @@ impl Player {
         cc: &eframe::CreationContext<'_>,
         path: &Path,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        Self::open_scene(cc, path, Camera::default())
-            .map_err(|error| io::Error::other(error.to_string()).into())
+        let result = (|| {
+            if project::is_project(path) {
+                let project = Project::load(path)?;
+                Self::from_project(
+                    cc,
+                    project.root.clone(),
+                    project.list().clone(),
+                    Camera::default(),
+                )
+            } else {
+                Self::new(cc, path, Camera::default(), None)
+            }
+        })();
+        result.map_err(|error| io::Error::other(error.to_string()).into())
     }
 
     fn open(cc: &eframe::CreationContext<'_>, root: &Path) -> Result<Self, Box<dyn Error>> {
         let launch: Launch = ron::from_str(&fs::read_to_string(root.join(MANIFEST))?)?;
-        if launch.format != FORMAT
-            || !launch.camera.eye.is_finite()
+        if !launch.camera.eye.is_finite()
             || !launch.camera.yaw.is_finite()
             || launch.camera.pitch.abs() > 1.58
             || !launch.camera.pitch.is_finite()
         {
             return Err("Invalid game manifest or camera".into());
         }
-        Self::open_scene(cc, &root.join(SCENE), launch.camera)
+        match (launch.format, launch.project) {
+            (FORMAT, None) => Self::new(cc, &root.join(SCENE), launch.camera, None),
+            (2, Some(project)) => {
+                Self::from_project(cc, root.canonicalize()?, project, launch.camera)
+            }
+            _ => Err("Unsupported game manifest".into()),
+        }
     }
 
-    fn open_scene(
+    fn from_project(
+        cc: &eframe::CreationContext<'_>,
+        root: PathBuf,
+        list: SceneList,
+        camera: Camera,
+    ) -> Result<Self, Box<dyn Error>> {
+        list.validate()?;
+        let entry = list.resolve(&root, &list.start)?;
+        Self::new(cc, &entry, camera, Some((root, list)))
+    }
+
+    fn new(
         cc: &eframe::CreationContext<'_>,
         entry: &Path,
         camera: Camera,
+        project: Option<(PathBuf, SceneList)>,
     ) -> Result<Self, Box<dyn Error>> {
-        let scene = Scene::load(entry)?;
-        let hierarchy = scene.hierarchy()?;
         let gpu = cc
             .wgpu_render_state
             .clone()
             .ok_or("A wgpu device is required")?;
+        let world = GameScene::load(entry, &cc.egui_ctx, gpu, camera)?;
+        cc.egui_ctx
+            .send_viewport_cmd(egui::ViewportCommand::Title(world.scene.name.clone()));
+        Ok(Self {
+            world,
+            project,
+            scene_error: None,
+            range_controls: RangeControls::default(),
+            input_settings: InputSettings::load(cc.storage),
+            controls_open: false,
+        })
+    }
+
+    fn transition(&mut self, ctx: &egui::Context, id: &str) {
+        let result = (|| {
+            let (root, list) = self
+                .project
+                .as_ref()
+                .ok_or("Open a Futty project to switch scenes")?;
+            let path = list.resolve(root, id)?;
+            GameScene::load(&path, ctx, self.world.viewport.gpu(), Camera::default())
+        })();
+        match result {
+            Ok(world) => {
+                self.range_controls.release(ctx);
+                self.world.audio.stop();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(world.scene.name.clone()));
+                self.world = world;
+                self.scene_error = None;
+            }
+            Err(error) => {
+                let message = format!("Scene {id:?}: {error}");
+                self.world.runtime.log_scene_error(message.clone());
+                self.scene_error = Some(message);
+            }
+        }
+    }
+}
+
+pub(crate) struct GameScene {
+    pub scene: Scene,
+    hierarchy: Hierarchy,
+    pub runtime: Runtime,
+    pub audio: Audio,
+    pub viewport: Viewport,
+}
+
+impl GameScene {
+    pub fn load(
+        entry: &Path,
+        ctx: &egui::Context,
+        gpu: RenderState,
+        camera: Camera,
+    ) -> Result<Self, Box<dyn Error>> {
+        let scene = Scene::load(entry)?;
+        let hierarchy = scene.hierarchy()?;
         let mut viewport = Viewport::new(gpu);
         viewport.camera = camera;
         let mut audio = Audio::default();
@@ -346,25 +458,82 @@ impl Player {
                     scripts.insert(asset.id, futty_assets::script_source(&bytes)?.to_owned());
                 }
             }
+            if scene
+                .hud
+                .iter()
+                .any(|widget| widget.image == Some(asset.id))
+            {
+                viewport.hud_image(ctx, asset.id, Some(&bytes));
+            }
         }
         let mut runtime = Runtime::new(&scene)?;
         runtime.start_scripts(&scene, &scripts);
-        cc.egui_ctx
-            .send_viewport_cmd(egui::ViewportCommand::Title(scene.name.clone()));
         Ok(Self {
             scene,
             hierarchy,
             runtime,
             audio,
             viewport,
-            range_controls: RangeControls::default(),
         })
+    }
+
+    pub fn paint(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        controls: &mut RangeControls,
+        settings: &InputSettings,
+        interactive: bool,
+    ) {
+        let rect = response.rect;
+        let index = self.scene.camera_index(None);
+        if index.is_none() && interactive {
+            self.viewport.camera = self.viewport.navigate(response, self.viewport.camera);
+        }
+        let frame = draw_objects(
+            &self.scene,
+            &self.hierarchy,
+            Some(&mut self.runtime),
+            self.viewport.camera,
+            index,
+            &[],
+            None,
+        );
+        self.viewport.render(
+            ui,
+            rect,
+            frame.render_scene(rect.aspect_ratio(), self.scene.sky),
+            true,
+        );
+        hud_view::paint(
+            ui,
+            rect,
+            &self.scene,
+            &mut self.viewport,
+            None,
+            Some(&mut self.runtime),
+            interactive && controls.cursor_free(),
+        );
+        if let Some(status) = self.runtime.range_status() {
+            let capture = interactive && !hud_view::over_button(ui.ctx(), rect, &self.scene.hud);
+            controls.paint(
+                ui,
+                response,
+                status,
+                settings,
+                self.scene.hud.is_empty(),
+                capture,
+            );
+        }
     }
 }
 
 impl eframe::App for Player {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if ctx.current_pass_index() == 0 {
+            InputSettings::toggle_shortcut(&ctx, &mut self.controls_open);
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -373,41 +542,49 @@ impl eframe::App for Player {
                     return;
                 }
                 let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-                let index = self.scene.camera_index(None);
-                if index.is_none() {
-                    self.viewport.camera = self.viewport.navigate(&response, self.viewport.camera);
-                }
                 if ctx.current_pass_index() == 0 {
-                    let is_range = self.runtime.range_status().is_some();
-                    let range = self.range_controls.input(&ctx, is_range);
-                    let (dt, mut keys) = game_input(&ctx, !is_range || range.active);
-                    keys.range = range;
-                    self.runtime.game_input(keys);
-                    self.runtime.tick(dt);
-                    self.audio.update();
-                    audio::pump(&mut self.audio, &mut self.runtime);
+                    let is_range = self.world.runtime.range_status().is_some();
+                    let game = (!self.controls_open).then_some(rect);
+                    let hud_blocks_mouse = self.range_controls.cursor_free()
+                        && hud_view::over_button(&ctx, rect, &self.world.scene.hud);
+                    let (dt, keys) = self.range_controls.input(
+                        &ctx,
+                        game,
+                        is_range,
+                        &self.input_settings,
+                        hud_blocks_mouse,
+                    );
+                    self.world.runtime.game_input(keys);
+                    self.world.runtime.tick(dt);
+                    if let Some(id) = self.world.runtime.take_scene_request() {
+                        self.transition(&ctx, &id);
+                    }
+                    self.world.audio.update();
+                    audio::pump(&mut self.world.audio, &mut self.world.runtime);
                 }
-                let camera = self.viewport.camera;
-                let frame = draw_objects(
-                    &self.scene,
-                    &self.hierarchy,
-                    Some(&mut self.runtime),
-                    camera,
-                    index,
-                    &[],
-                    None,
-                );
-                self.viewport.render(
+                self.world.paint(
                     ui,
-                    rect,
-                    frame.render_scene(rect.aspect_ratio(), self.scene.sky),
-                    true,
+                    &response,
+                    &mut self.range_controls,
+                    &self.input_settings,
+                    !self.controls_open,
                 );
-                if let Some(status) = self.runtime.range_status() {
-                    self.range_controls.paint(ui, &response, status);
+                if let Some(error) = &self.scene_error {
+                    ui.painter().text(
+                        rect.left_bottom() + egui::vec2(12.0, -12.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        error,
+                        egui::FontId::proportional(14.0),
+                        egui::Color32::LIGHT_RED,
+                    );
                 }
             });
+        self.input_settings.window(&ctx, &mut self.controls_open);
         ctx.request_repaint();
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.input_settings.save(storage);
     }
 
     fn persist_egui_memory(&self) -> bool {
@@ -419,7 +596,111 @@ impl eframe::App for Player {
 mod tests {
     use super::*;
     use futty_runtime::{Billboard, Object, Sprite};
+
+    #[test]
+    fn beacon_bot_export_keeps_its_rig_and_hud_can_switch_to_a_one_shot_clip()
+    -> Result<(), Box<dyn Error>> {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/animation-playground/Beacon Bot.futty.scene.ron");
+        let root = tempfile::tempdir()?;
+        let executable = root.path().join("template.exe");
+        fs::write(&executable, b"test template")?;
+        let output = root.path().join("Beacon-Windows");
+        export(&source, &output, Camera::default(), &executable)?;
+        let entry = output.join(SCENE);
+        let scene = Scene::load(&entry)?;
+        let bot = &scene.entities[0];
+        let asset = scene
+            .assets
+            .iter()
+            .find(|asset| Some(asset.id) == bot.mesh)
+            .unwrap();
+        let model = futty_assets::model(&futty_assets::read_saved(&entry, asset)?)?;
+        assert_eq!(model.rig.unwrap().clips().len(), 3);
+
+        let mut runtime = Runtime::new(&scene)?;
+        runtime.start_scripts(&scene, &HashMap::new());
+        runtime.tick(1.0 / 60.0);
+        let (_, (idle, time)) = runtime.animated_objects().next().unwrap();
+        assert_eq!(idle, bot.animation.unwrap());
+        assert!(time > 0.0);
+        runtime.click_hud("signal");
+        runtime.tick(1.0 / 60.0);
+        let (_, (signal, time)) = runtime.animated_objects().next().unwrap();
+        assert_eq!(signal.clip, 2);
+        assert!(!signal.looping);
+        assert_eq!(time, 0.0);
+        runtime.tick(1.0 / 60.0);
+        assert!(runtime.animated_objects().next().unwrap().1.1 > 0.0);
+        assert_eq!(scene.entities[0].animation, Some(idle));
+        Ok(())
+    }
     use glam::{Vec2, Vec3};
+
+    #[test]
+    fn spawned_prefab_children_render_and_despawn_together() {
+        use futty_runtime::{Body, GameInput, InputAction, Motion, Prefab};
+        let mut scene = Scene::default();
+        let asset = Uuid::new_v4();
+        scene.assets.push(Asset {
+            id: asset,
+            name: "Spawner".into(),
+            kind: AssetKind::Script,
+        });
+        scene.script_sources.insert(
+            asset,
+            r#"
+            fn on_start(entity) { this.branch = spawn_prefab("Pair", 2, 0, 0); }
+            fn on_update(entity, dt) { if input_pressed("Interact") { despawn(this.branch); } }
+        "#
+            .into(),
+        );
+        scene.entities[0].script = Some(asset);
+        let mut root = Object::cube("Root".into(), Vec3::ZERO);
+        root.spin = false;
+        root.body = Some(Body {
+            motion: Motion::Fixed,
+            ..Default::default()
+        });
+        let mut child = Object::cube("Child".into(), Vec3::Y);
+        child.parent = Some(root.uuid);
+        scene.prefabs.insert(
+            Uuid::new_v4(),
+            Prefab {
+                name: "Pair".into(),
+                entities: vec![root, child],
+                source: None,
+            },
+        );
+        let mut runtime = Runtime::new(&scene).unwrap();
+        runtime.start_scripts(&scene, &HashMap::new());
+        runtime.tick(1.0 / 60.0);
+        let hierarchy = scene.hierarchy().unwrap();
+        let render = |runtime: &mut Runtime| {
+            draw_objects(
+                &scene,
+                &hierarchy,
+                Some(runtime),
+                Camera::default(),
+                None,
+                &[],
+                None,
+            )
+        };
+        let spawned = render(&mut runtime);
+        assert_eq!(spawned.instances.len(), 3);
+        assert_eq!(spawned.world[2].w_axis.truncate(), Vec3::new(2.0, 1.0, 0.0));
+        assert_eq!(runtime.physics_body_count(), 1);
+        let mut input = GameInput::default();
+        input.actions[InputAction::Interact as usize].pressed = true;
+        runtime.game_input(input);
+        runtime.tick(1.0 / 60.0);
+        runtime.game_input(GameInput::default());
+        runtime.tick(1.0 / 60.0);
+        assert_eq!(render(&mut runtime).instances.len(), 1);
+        assert_eq!(runtime.physics_body_count(), 0);
+        assert_eq!(scene.entities.len(), 1);
+    }
 
     #[test]
     fn shared_material_edits_reach_every_mesh_in_edit_and_play() {
@@ -552,6 +833,16 @@ mod tests {
         };
         futty_assets::save(&source, &texture, bytes)?;
         scene.assets.push(texture.clone());
+        let hud_texture = Asset {
+            id: Uuid::new_v4(),
+            name: "HUD texture".into(),
+            kind: AssetKind::Texture,
+        };
+        futty_assets::save(&source, &hud_texture, bytes)?;
+        scene.assets.push(hud_texture.clone());
+        let mut image = futty_runtime::HudWidget::new(futty_runtime::HudKind::Image);
+        image.image = Some(hud_texture.id);
+        scene.hud.push(image);
         let material = Uuid::new_v4();
         scene.materials.insert(
             material,
@@ -585,16 +876,55 @@ mod tests {
         let portable = output.join(SCENE);
         let exported = Scene::load(&portable)?;
         assert_eq!(exported.sky, scene.sky);
-        assert_eq!(exported.assets, vec![asset.clone(), texture.clone()]);
+        assert_eq!(
+            exported.assets,
+            vec![asset.clone(), texture.clone(), hud_texture.clone()]
+        );
+        assert_eq!(exported.hud, scene.hud);
         assert_eq!(exported.materials.len(), 1);
         assert!(exported.prefabs.is_empty());
+        assert!(
+            exported
+                .entities
+                .iter()
+                .all(|object| object.prefab.is_none())
+        );
         assert_eq!(exported.entities.len(), scene.entities.len());
         assert_eq!(exported.materials[&material], scene.materials[&material]);
         assert_eq!(futty_assets::read_saved(&portable, &texture)?, bytes);
         assert_eq!(futty_assets::read_saved(&portable, &asset)?, bytes);
+        assert_eq!(futty_assets::read_saved(&portable, &hud_texture)?, bytes);
         assert_eq!(fs::read(output.join("Game.exe"))?, b"test template");
         assert!(output.join(MANIFEST).is_file());
         assert!(export(&source, &output, Camera::default(), &executable).is_err());
+
+        let prefab_model = scene.assets.last().unwrap().clone();
+        let model_bytes = include_bytes!("../../../examples/asset-preview/Workshop Crate.glb");
+        futty_assets::save(&source, &prefab_model, model_bytes)?;
+        let script = Uuid::new_v4();
+        scene.assets.push(Asset {
+            id: script,
+            name: "Spawner".into(),
+            kind: AssetKind::Script,
+        });
+        scene.entities[0].script = Some(script);
+        scene.script_sources.insert(
+            script,
+            r#"fn on_start(entity) { spawn_prefab("Template only", 2, 0, 0); }"#.into(),
+        );
+        scene.save(&source)?;
+        let scripted_output = root.path().join("Scripted");
+        export(&source, &scripted_output, Camera::default(), &executable)?;
+        let portable = scripted_output.join(SCENE);
+        let exported = Scene::load(&portable)?;
+        assert_eq!(
+            futty_assets::read_saved(&portable, &prefab_model)?,
+            model_bytes
+        );
+        let mut runtime = Runtime::new(&exported).unwrap();
+        runtime.start_scripts(&exported, &HashMap::new());
+        runtime.tick(1.0 / 60.0);
+        assert_eq!(runtime.spawned_objects()[0].mesh, Some(prefab_model.id));
         Ok(())
     }
 
@@ -619,4 +949,43 @@ mod tests {
         assert!(!output.exists());
         Ok(())
     }
+}
+#[test]
+fn exported_project_launches_its_lobby_and_resolves_its_scripted_destination()
+-> Result<(), Box<dyn Error>> {
+    let example = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/pulse-range/Pulse Range.futty.project.ron");
+    let root = tempfile::tempdir()?;
+    let executable = root.path().join("template.exe");
+    fs::write(&executable, b"test template")?;
+    let output = root.path().join("Range-Windows");
+    export(&example, &output, Camera::default(), &executable)?;
+    let relocated = root.path().join("Moved");
+    fs::rename(output, &relocated)?;
+    let relocated = relocated.canonicalize()?;
+
+    let launch: Launch = ron::from_str(&fs::read_to_string(relocated.join(MANIFEST))?)?;
+    assert_eq!(launch.format, 2);
+    let list = launch.project.unwrap();
+    list.validate()?;
+    let entry = list.resolve(&relocated, &list.start)?;
+    let lobby = Scene::load(&entry)?;
+    assert_eq!(lobby.name, "Range Lobby");
+    let mut runtime = Runtime::new(&lobby)?;
+    runtime.start_scripts(&lobby, &HashMap::new());
+    runtime.tick(1.0 / 60.0);
+    assert!(runtime.take_scene_request().is_none());
+    runtime.click_hud("enter_range");
+    runtime.tick(1.0 / 60.0);
+    runtime.tick(1.0 / 60.0);
+    let requested = runtime.take_scene_request().unwrap();
+    assert!(runtime.take_scene_request().is_none());
+    let path = list.resolve(&relocated, &requested)?;
+    let range = Scene::load(&path)?;
+    assert_eq!(range.name, "Pulse Range");
+    assert!(range.training_range.is_some());
+    for asset in &range.assets {
+        assert!(!futty_assets::read_saved(&path, asset)?.is_empty());
+    }
+    Ok(())
 }

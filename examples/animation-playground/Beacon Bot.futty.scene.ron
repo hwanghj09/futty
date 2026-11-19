@@ -1,0 +1,72 @@
+(
+    format_version: 18,
+    scene_uuid: "e140a25c-5bb6-4367-babd-e76c0cfbb566",
+    name: "Beacon Bot",
+    entities: [
+        (
+            uuid: "cd7be135-05a0-4348-8c0a-e7ab31d14174",
+            name: "Beacon Bot",
+            transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            color: (1.0, 1.0, 1.0),
+            spin: false,
+            mesh: Some("6c5cb6d0-3ec5-4142-8af3-368c0c033dde"),
+            animation: Some((clip: 0, speed: 1.0, looping: true)),
+            script: Some("9322460c-839c-4ecd-9672-af3a53a7e9a7"),
+        ),
+        (
+            uuid: "f5039276-c0a8-471b-94ef-911653c52f1b",
+            name: "Stage",
+            transform: (translation: (0.0, -0.10, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (5.0, 0.2, 4.0)),
+            color: (0.19, 0.27, 0.34),
+            spin: false,
+        ),
+        (
+            uuid: "1af77d82-e03e-4401-850e-8b919af1175b",
+            name: "Stage Camera",
+            transform: (translation: (1.595, 1.7, 4.383), rotation: (-0.083063, 0.173001, 0.014646, 0.981309), scale: (1.0, 1.0, 1.0)),
+            color: (1.0, 1.0, 1.0),
+            spin: false,
+            camera: Some((projection: Perspective, fov: 37.0, size: 5.0, near: 0.05, far: 100.0)),
+        ),
+        (
+            uuid: "d54eab67-cad7-4617-92ac-2e3852255969",
+            name: "Key Light",
+            transform: (translation: (4.0, 6.0, 5.0), rotation: (-0.35355338, 0.35355338, 0.14644661, 0.8535534), scale: (1.0, 1.0, 1.0)),
+            color: (1.0, 1.0, 1.0),
+            spin: false,
+            light: Some((kind: Directional, color: (0.92, 0.97, 1.0), intensity: 1.3, range: 8.0, cast_shadows: true, shadow_distance: 16.0)),
+        ),
+    ],
+    assets: [
+        (id: "6c5cb6d0-3ec5-4142-8af3-368c0c033dde", name: "Beacon Bot", kind: Model),
+        (id: "9322460c-839c-4ecd-9672-af3a53a7e9a7", name: "Clip Controls", kind: Script),
+    ],
+    script_sources: {
+        "9322460c-839c-4ecd-9672-af3a53a7e9a7": r#"
+fn on_start(entity) {
+    set_hud("clip", "IDLE");
+}
+
+fn on_update(entity, dt) {
+    if hud_pressed("idle") {
+        play_animation(entity, 0, true);
+        set_hud("clip", "IDLE");
+    } else if hud_pressed("walk") {
+        play_animation(entity, 1, true);
+        set_hud("clip", "WALK");
+    } else if hud_pressed("signal") {
+        play_animation(entity, 2, false);
+        set_hud("clip", "SIGNAL");
+    }
+}
+"#,
+    },
+    main_camera: Some("1af77d82-e03e-4401-850e-8b919af1175b"),
+    sky: true,
+    hud: [
+        (id: "1631bcce-d378-459e-9123-9792644bbc92", kind: Text, label: "BEACON BOT", binding: "clip", anchor: TopLeft, offset: (16.0, 16.0), size: (150.0, 54.0), color: (108, 239, 206), text_size: 21.0),
+        (id: "e57416e5-2015-434f-89a4-a5cf22bc1322", kind: Button, label: "Idle", binding: "idle", anchor: BottomLeft, offset: (16.0, 16.0), size: (100.0, 42.0), color: (108, 239, 206), text_size: 18.0),
+        (id: "e0c485bb-b7a2-4558-b29d-750db7b117c5", kind: Button, label: "Walk", binding: "walk", anchor: BottomLeft, offset: (124.0, 16.0), size: (100.0, 42.0), color: (108, 239, 206), text_size: 18.0),
+        (id: "03c5b104-df95-426a-8cca-f5f17c459c34", kind: Button, label: "Signal", binding: "signal", anchor: BottomLeft, offset: (232.0, 16.0), size: (100.0, 42.0), color: (108, 239, 206), text_size: 18.0),
+    ],
+)

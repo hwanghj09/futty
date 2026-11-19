@@ -1,0 +1,10 @@
+(
+    format: 1,
+    scenes: (
+        start: "Range Lobby",
+        scenes: {
+            "Pulse Range": "Pulse Range.futty.scene.ron",
+            "Range Lobby": "Range Lobby.futty.scene.ron",
+        },
+    ),
+)

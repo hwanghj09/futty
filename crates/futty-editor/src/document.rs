@@ -17,6 +17,7 @@ pub struct Document {
     undo: VecDeque<History>,
     redo: Vec<History>,
     gesture: Option<Scene>,
+    pub prefab_error: Option<String>,
 }
 
 struct History {
@@ -36,11 +37,18 @@ impl Document {
             undo: VecDeque::new(),
             redo: Vec::new(),
             gesture: None,
+            prefab_error: None,
         }
     }
 
     pub fn dirty(&self) -> bool {
         self.scene != self.saved
+    }
+
+    pub fn saved_asset_path(&self, id: Uuid) -> Option<&std::path::Path> {
+        self.path
+            .as_deref()
+            .filter(|_| self.saved.assets.iter().any(|asset| asset.id == id))
     }
 
     pub fn can_undo(&self) -> bool {
@@ -68,6 +76,22 @@ impl Document {
             return;
         }
         let before = self.history_with_selection();
+        let detach: HashSet<_> = self
+            .scene
+            .entities
+            .iter()
+            .filter_map(|object| {
+                object
+                    .prefab
+                    .filter(|link| {
+                        removed.contains(&object.uuid) && !removed.contains(&link.instance)
+                    })
+                    .map(|link| link.instance)
+            })
+            .collect();
+        for root in detach {
+            self.scene.detach_prefab(root);
+        }
         self.scene
             .entities
             .retain(|object| !removed.contains(&object.uuid));
@@ -101,6 +125,10 @@ impl Document {
             .map(|(index, root)| {
                 let mut copy = entities[index].clone();
                 copy.uuid = remap[&copy.uuid];
+                copy.prefab = copy.prefab.and_then(|mut link| {
+                    link.instance = *remap.get(&link.instance)?;
+                    Some(link)
+                });
                 copy.audio_listener = None;
                 if root {
                     copy.name.push_str(" Copy");
@@ -143,8 +171,10 @@ impl Document {
             if !root || object.parent == parent {
                 continue;
             }
-            if parent.is_some() && object.body.is_some() {
-                return Err("Physics bodies must stay at the scene root.".into());
+            if parent.is_some() && (object.body.is_some() || object.character.is_some()) {
+                return Err(
+                    "Rigid bodies and character controllers must stay at the scene root.".into(),
+                );
             }
             let local = inverse * worlds[index];
             if !local.is_finite() {
@@ -159,6 +189,10 @@ impl Document {
         }
         let before = self.history_with_selection();
         for (index, transform) in updates {
+            let object = &self.scene.entities[index];
+            if let Some(link) = object.prefab.filter(|link| link.instance != object.uuid) {
+                self.scene.detach_prefab(link.instance);
+            }
             self.scene.entities[index].parent = parent;
             self.scene.entities[index].transform = transform;
         }
@@ -214,6 +248,12 @@ impl Document {
 
     fn record(&mut self, before: History) {
         if before.scene != self.scene {
+            self.prefab_error = self
+                .scene
+                .sync_prefabs(&before.scene)
+                .err()
+                .map(|error| error.to_string());
+            self.selection.retain(&self.scene.entities);
             if self.undo.len() == 64 {
                 self.undo.pop_front();
             }
@@ -237,6 +277,7 @@ impl Document {
     }
 
     fn restore(&mut self, entry: History) -> History {
+        self.prefab_error = None;
         let scene = std::mem::replace(&mut self.scene, entry.scene);
         let selection = entry.selection.map(|ids| {
             let previous = self.selection.ids().to_vec();
@@ -251,6 +292,27 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_source_edit_and_linked_propagation_undo_and_redo_together() {
+        let mut doc = Document::new(Scene::default(), None);
+        let id = doc.create_prefab().unwrap();
+        let root = doc.instantiate_prefab(id, glam::Vec3::X * 4.0).unwrap();
+        doc.duplicate_selection();
+        let duplicate = doc.selection.primary().unwrap();
+        assert_ne!(root, duplicate);
+        let before = doc.scene.clone();
+        doc.scene.entities[0].color = [0.1, 0.6, 0.8];
+        doc.record_frame(before.clone(), false);
+        assert_eq!(doc.scene.entities[1].color, doc.scene.entities[0].color);
+        assert_eq!(doc.scene.entities[2].color, doc.scene.entities[0].color);
+        assert_eq!(doc.scene.entities[2].prefab.unwrap().instance, duplicate);
+        let recolored = doc.scene.clone();
+        doc.undo();
+        assert_eq!(doc.scene, before);
+        doc.redo();
+        assert_eq!(doc.scene, recolored);
+    }
 
     #[test]
     fn creating_and_placing_prefabs_undoes_as_single_edits_with_selection_restored() {

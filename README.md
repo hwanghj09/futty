@@ -17,6 +17,7 @@ Futty는 **AI 에이전트가 MCP로 3D 게임을 만들고 검증할 수 있도
 | 게임 예제를 직접 실행하고 싶어요 | [Windows에서 에디터 실행](#windows에서-에디터-실행) |
 | 새 게임을 만들고 싶어요 | **File → Project → New Project…**에서 빈 폴더를 선택하세요. [프로젝트 사용법](docs/guide.md#프로젝트와-씬-전환) |
 | Codex에게 설치와 연결을 맡기고 싶어요 | [다음 프롬프트를 복사](#codex로-futty-설치-및-mcp-연결) |
+| Claude에서 게임을 만들고 싶어요 | [Claude Code와 Claude Desktop에 연결](#claude-code와-claude-desktop에-연결) |
 | 만든 게임을 다른 사람에게 보내고 싶어요 | [Windows 게임 내보내기](docs/guide.md#windows-게임-내보내기) |
 
 ### Windows에서 에디터 실행
@@ -64,6 +65,23 @@ cargo run --locked -p futty-editor -- --edit "examples/pulse-range/Pulse Range.f
 5. 마지막에 설치 경로와 등록 여부, 예제 씬 조회 결과를 알려줘.
 ```
 
+### Claude Code와 Claude Desktop에 연결
+
+Windows에서 Futty 폴더를 열고 사용하는 클라이언트에 맞는 명령을 실행하세요. 서버를 처음 빌드할 때는 Rustup과 Visual Studio C++ Build Tools가 필요합니다.
+
+```powershell
+# Claude Code
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Client ClaudeCode
+
+# Claude Desktop
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Client ClaudeDesktop
+```
+
+- **Claude Code**에서는 같은 폴더에서 새 세션을 열고 `/mcp`로 `futty` 연결을 확인하세요. 이 폴더를 이미 Claude Code에서 열었다면 **“Futty MCP 연결해줘”**라고 요청해도 됩니다.
+- **Claude Desktop**에서는 앱을 한 번 실행한 뒤 완전히 종료하고 등록 명령을 실행하세요. 앱을 다시 열면 Futty가 로컬 도구로 표시됩니다.
+
+연결된 Claude에 **“Futty MCP로 Beacon Bot Escape 예제 씬을 조회해줘”**라고 요청해 보세요. [연결 상세 가이드](docs/guide.md#claude에서-futty-mcp-사용하기)
+
 ### 더 살펴볼 예제
 
 | 예제 | 열거나 실행하는 방법 |
@@ -80,7 +98,7 @@ cargo run --locked -p futty-editor -- --edit "examples/pulse-range/Pulse Range.f
 
 ## AI 에이전트용 작업 절차
 
-Futty 작업을 시작할 때 [AGENTS.md](AGENTS.md)를 읽고, 현재 사본이 MCP에 등록됐는지 확인합니다. 도구 목록은 연결된 서버에서 확인합니다.
+Futty 작업을 시작할 때 Codex는 [AGENTS.md](AGENTS.md), Claude Code는 [CLAUDE.md](CLAUDE.md)를 읽고 현재 사본이 MCP에 등록됐는지 확인합니다. [Claude 연결 명령](docs/guide.md#claude에서-futty-mcp-사용하기)
 
 | 단계 | 실행할 일 |
 | --- | --- |

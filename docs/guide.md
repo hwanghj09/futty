@@ -149,6 +149,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1
 
 [Beacon Bot Escape](../examples/agent-escape/Beacon%20Bot%20Escape.futty.scene.ron)에서 조작할 수 있는 카메라, 고정 충돌체, Rhai 스위치와 문, 목표 HUD를 확인할 수 있습니다. **Play**를 누르고 **W**로 전진해 주황색 스위치 옆에서 **E**를 누른 뒤, 열린 문을 지나면 됩니다.
 
+## Claude에서 Futty MCP 사용하기
+
+Windows에서 Futty 폴더를 열고 사용할 클라이언트의 명령을 실행합니다. 기본 연결은 서버를 먼저 빌드하므로 Rustup과 Visual Studio C++ Build Tools가 필요합니다. 이 사본의 WSL 빌드가 이미 있다면 `-WslBinary`에 실행 파일 경로를 지정할 수 있습니다.
+
+```powershell
+# Claude Code
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Client ClaudeCode
+
+# Claude Desktop
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Client ClaudeDesktop
+```
+
+- **Claude Code**는 현재 작업 폴더에만 `futty`를 등록합니다. 이 폴더에서 Claude Code를 열고 `/mcp`로 연결을 확인합니다. [Claude Code MCP 문서](https://code.claude.com/docs/en/mcp)
+- **Claude Desktop**은 한 번 실행해 설정 폴더를 만든 뒤 완전히 종료하고 등록 명령을 실행합니다. 스크립트가 `%APPDATA%\Claude\claude_desktop_config.json`의 `futty` 항목을 작성합니다. 앱을 다시 열어 로컬 도구가 나타나는지 확인합니다. [MCP 호스트 연결 문서](https://py.sdk.modelcontextprotocol.io/get-started/real-host/)
+
+연결을 시험하려면 **“Futty MCP로 `examples/agent-escape/Beacon Bot Escape.futty.scene.ron` 씬을 조회해줘”**라고 요청합니다.
+
 ## MCP 에셋과 재질
 
 | 도구 | 사용 방법 |

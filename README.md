@@ -13,7 +13,7 @@
 Windows에서 Futty를 처음 쓰려면 아래 프롬프트를 복사해 Codex 채팅에 붙여넣으세요.
 
 ```text
-내 Windows PC에 Futty를 설치하고 이 Codex에 Futty MCP를 연결해줘.
+내 Windows PC에 Futty를 설치하고 여기에 Futty MCP를 연결해줘.
 명령을 설명하는 데 그치지 말고 직접 실행해서 등록과 연결 확인까지 진행해줘.
 
 1. https://github.com/hwanghj09/futty.git 를 새 futty 폴더에 클론해줘.
@@ -22,7 +22,7 @@ Windows에서 Futty를 처음 쓰려면 아래 프롬프트를 복사해 Codex �
    Visual Studio C++ Build Tools(MSVC 및 Windows SDK)를 확인하고, 빠진 도구가
    있으면 설치 가능한 범위에서 설치해줘. 관리자 승인이나 재시작이 필요한 단계만 알려줘.
 3. Futty 저장소 루트에서 아래 명령을 실행해서 서버를 빌드하고, 현재 Futty 폴더를
-   작업 경로로 지정해 futty라는 이름으로 Codex MCP에 등록해줘.
+   작업 경로로 지정해 futty라는 이름으로 MCP에 등록해줘.
    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1
 4. codex mcp get futty로 등록된 실행 파일과 작업 경로를 확인해줘.
    MCP 도구가 보이면 scene_inspect로 examples/agent-escape/Beacon Bot Escape.futty.scene.ron

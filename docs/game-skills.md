@@ -58,6 +58,7 @@ ABA Games의 공개 스킬을 참고해 Futty 도구로 실행할 수 있는 지
 | [Futty 게임 피드백](../.agents/skills/futty-game-feel/SKILL.md) | 상호작용, 아이템 획득, 충돌 상태를 HUD와 시청각 효과로 전달 |
 | [Futty 밸런스 검증](../.agents/skills/futty-balance/SKILL.md) | 같은 조건에서 전략별 성공률, 소요 틱, 기록된 점수를 비교 |
 | [Futty 토큰 최적화](../.agents/skills/futty-token-optimization/SKILL.md) | RTK 출력 압축, MCP 조회 범위와 호출 수 조절, 실패 진단 보존 |
+| [Ponytail](../.agents/skills/ponytail/SKILL.md) | 기존 코드를 재사용해 요구사항을 충족하는 가장 작은 변경을 구현하고 검증. [원본 5.3.3](https://github.com/DietrichGebert/ponytail/tree/96608e078b2d5ea607c5c3b8b5a54d1c1fba6846/skills/ponytail) · [MIT 라이선스](../.agents/skills/ponytail/LICENSE) |
 
 | 스킬 후보 | 입력 → 산출물 | 사용할 Futty 기능 |
 | --- | --- | --- |

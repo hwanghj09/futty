@@ -138,6 +138,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1
 
 [Beacon Bot Escape](../examples/agent-escape/Beacon%20Bot%20Escape.futty.scene.ron)에서 조작할 수 있는 카메라, 고정 충돌체, Rhai 스위치와 문, 목표 HUD를 확인할 수 있습니다. **Play**를 누르고 **W**로 전진해 주황색 스위치 옆에서 **E**를 누른 뒤, 열린 문을 지나면 됩니다.
 
+## 씬 검증과 프로젝트 관리
+
+- `scene_validate`에 저장된 씬의 `path`를 넘기면 `valid`와 `issues`를 반환합니다. 씬 구조 검사에서 오류가 나면 첫 오류를 보고하고, 구조가 유효하면 저장된 에셋 파일을 검사합니다. 문제에 따라 `field`, `object_id`, `asset_id`가 제공됩니다.
+- `project_create`로 저장된 씬들을 프로젝트에 묶습니다. 아래 예제의 `path`는 MCP 작업 폴더 기준이며 `scenes`에 들어가는 경로는 프로젝트 파일이 있는 폴더 기준입니다. 프로젝트 파일은 에디터의 **Project → Open Project**에서 열 수 있습니다.
+
+```json
+{
+  "path": "examples/agent-escape/Beacon Bot Escape.futty.project.ron",
+  "start": "escape",
+  "scenes": {"escape": "Beacon Bot Escape.futty.scene.ron"}
+}
+```
+
+- `project_inspect`는 `path`에 해당하는 프로젝트의 씬 목록과 시작 씬 ID를 반환합니다.
+- `project_set_start_scene`에는 프로젝트의 `path`와 새 시작 씬 ID인 `start`를 넘깁니다. 이미 등록되어 있고 불러올 수 있는 씬을 선택해야 합니다.
+
 ## AI 플레이 세션
 
 Futty MCP의 플레이 도구는 저장된 씬에서 창 없이 게임을 실행합니다. 메인 카메라에 캐릭터 컨트롤러가 있어야 합니다. 다음은 [Beacon Bot Escape](../examples/agent-escape/Beacon%20Bot%20Escape.futty.scene.ron)의 시작 입력입니다.

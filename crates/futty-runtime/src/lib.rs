@@ -19,6 +19,7 @@ mod audio;
 mod character;
 mod hud;
 mod prefab;
+pub mod project;
 mod range;
 mod script;
 mod sprite;
@@ -47,6 +48,33 @@ pub enum GameOutcome {
 }
 
 type SceneResult<T> = Result<T, Box<dyn Error>>;
+
+#[derive(Debug, Serialize)]
+pub struct SceneIssue {
+    pub field: &'static str,
+    pub object_id: Option<Uuid>,
+    pub message: String,
+}
+
+impl std::fmt::Display for SceneIssue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for SceneIssue {}
+
+fn scene_issue(
+    field: &'static str,
+    object_id: Option<Uuid>,
+    message: impl Into<String>,
+) -> Box<dyn Error> {
+    Box::new(SceneIssue {
+        field,
+        object_id,
+        message: message.into(),
+    })
+}
 
 pub fn valid_scene_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.trim() == id && !id.chars().any(char::is_control)
@@ -261,7 +289,11 @@ impl Scene {
                 .iter()
                 .any(|object| object.uuid == id && object.camera.is_some())
         }) {
-            return Err("Main Camera must reference a camera object in the scene".into());
+            return Err(scene_issue(
+                "main_camera",
+                self.main_camera,
+                "Main Camera must reference a camera object in the scene",
+            ));
         }
         if let Some(range) = &self.training_range {
             range.validate(self)?;
@@ -324,7 +356,13 @@ impl Scene {
                 return Err(format!("Invalid prefab: {}", prefab.name).into());
             }
             self.validate_objects(&prefab.entities, &assets)
-                .map_err(|error| format!("Prefab {}: {error}", prefab.name))?;
+                .map_err(|error| match error.downcast::<SceneIssue>() {
+                    Ok(mut issue) => {
+                        issue.message = format!("Prefab {}: {}", prefab.name, issue.message);
+                        issue as Box<dyn Error>
+                    }
+                    Err(error) => format!("Prefab {}: {error}", prefab.name).into(),
+                })?;
         }
         self.validate_prefab_links()
     }
@@ -338,7 +376,11 @@ impl Scene {
         let mut listener = false;
         for object in objects {
             if object.uuid.is_nil() || !ids.insert(object.uuid) {
-                return Err(format!("Missing or duplicate object UUID: {}", object.uuid).into());
+                return Err(scene_issue(
+                    "uuid",
+                    Some(object.uuid),
+                    format!("Missing or duplicate object UUID: {}", object.uuid),
+                ));
             }
             let mut tags = HashSet::new();
             if object.tags.len() > 32
@@ -357,7 +399,11 @@ impl Scene {
                 .material
                 .is_some_and(|id| !self.materials.contains_key(&id))
             {
-                return Err(format!("Missing material on {}", object.name).into());
+                return Err(scene_issue(
+                    "material",
+                    Some(object.uuid),
+                    format!("Missing material on {}", object.name),
+                ));
             }
             if !transform.translation.is_finite()
                 || !transform.rotation.is_normalized()
@@ -367,17 +413,22 @@ impl Scene {
             {
                 return Err(format!("Invalid transform or color on {}", object.name).into());
             }
-            for (id, kind) in [
-                (object.mesh, AssetKind::Model),
-                (object.texture, AssetKind::Texture),
+            for (field, id, kind) in [
+                ("mesh", object.mesh, AssetKind::Model),
+                ("texture", object.texture, AssetKind::Texture),
                 (
+                    "sprite.texture",
                     object.sprite.map(|sprite| sprite.texture),
                     AssetKind::Texture,
                 ),
-                (object.script, AssetKind::Script),
+                ("script", object.script, AssetKind::Script),
             ] {
                 if id.is_some_and(|id| assets.get(&id) != Some(&kind)) {
-                    return Err(format!("Invalid asset reference on {}", object.name).into());
+                    return Err(scene_issue(
+                        field,
+                        Some(object.uuid),
+                        format!("Invalid asset reference on {}", object.name),
+                    ));
                 }
             }
             if object.animation.is_some_and(|animation| {
@@ -393,7 +444,11 @@ impl Scene {
                 return Err(format!("Invalid Sprite3D size on {}", object.name).into());
             }
             if object.camera.is_some_and(|lens| !lens.valid()) {
-                return Err(format!("Invalid camera settings on {}", object.name).into());
+                return Err(scene_issue(
+                    "camera",
+                    Some(object.uuid),
+                    format!("Invalid camera settings on {}", object.name),
+                ));
             }
             if object.light.is_some_and(|light| !light.valid()) {
                 return Err(format!("Invalid light settings on {}", object.name).into());
@@ -506,9 +561,13 @@ impl Hierarchy {
         for (index, object) in objects.iter().enumerate() {
             let parent = match object.parent {
                 Some(id) => {
-                    let &parent = indices
-                        .get(&id)
-                        .ok_or_else(|| format!("Missing parent of {}", object.name))?;
+                    let &parent = indices.get(&id).ok_or_else(|| {
+                        scene_issue(
+                            "parent",
+                            Some(object.uuid),
+                            format!("Missing parent of {}", object.name),
+                        )
+                    })?;
                     children[parent].push(index);
                     Some(parent)
                 }
@@ -531,7 +590,16 @@ impl Hierarchy {
             );
         }
         if order.len() != objects.len() {
-            return Err("Scene hierarchy contains a cycle".into());
+            let visited: HashSet<_> = order.iter().map(|&(index, _)| index).collect();
+            let blocked = objects
+                .iter()
+                .enumerate()
+                .find(|(index, _)| !visited.contains(index));
+            return Err(scene_issue(
+                "parent",
+                blocked.map(|(_, object)| object.uuid),
+                "Scene hierarchy contains a cycle",
+            ));
         }
         Ok(Hierarchy { parents, order })
     }

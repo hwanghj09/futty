@@ -1,176 +1,10 @@
-use std::{
-    collections::{BTreeMap, HashSet},
-    error::Error,
-    fs,
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::{error::Error, path::Path};
 
 use eframe::egui;
-use futty_runtime::{Scene, valid_scene_id};
-use serde::{Deserialize, Serialize};
+use futty_runtime::project::{MAX_SCENES, SUFFIX};
+pub(crate) use futty_runtime::project::{Project, SceneList, is_project};
 
-use crate::{Action, Editor, file_name, menu_item, scene_dialog};
-
-const SUFFIX: &str = ".futty.project.ron";
-const MAX_SCENES: usize = 64;
-
-pub(crate) fn is_project(path: &Path) -> bool {
-    file_name(path).ends_with(SUFFIX)
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SceneList {
-    pub start: String,
-    pub scenes: BTreeMap<String, String>,
-}
-
-impl SceneList {
-    pub fn validate(&self) -> Result<(), Box<dyn Error>> {
-        let mut paths = HashSet::new();
-        if self.scenes.len() > MAX_SCENES
-            || !self.scenes.contains_key(&self.start)
-            || self.scenes.iter().any(|(id, path)| {
-                !valid_scene_id(id)
-                    || !path.ends_with(".ron")
-                    || path.contains(['\\', ':'])
-                    || path
-                        .split('/')
-                        .any(|part| part.is_empty() || part == "." || part == "..")
-                    || !paths.insert(path)
-            })
-        {
-            return Err("Invalid scene list. Use unique IDs and relative .ron paths, and choose a start scene.".into());
-        }
-        Ok(())
-    }
-
-    pub fn resolve(&self, root: &Path, id: &str) -> Result<PathBuf, Box<dyn Error>> {
-        let relative = self
-            .scenes
-            .get(id)
-            .ok_or_else(|| format!("Unknown scene ID {id:?}"))?;
-        let path = root
-            .join(relative)
-            .canonicalize()
-            .map_err(|error| format!("{id}: {error}"))?;
-        if !path.starts_with(root) || !path.is_file() {
-            return Err(format!("Scene {id:?} must be a file inside the project folder").into());
-        }
-        Ok(path)
-    }
-
-    fn add(&mut self, root: &Path, path: &Path) -> Result<String, Box<dyn Error>> {
-        let path = path.canonicalize()?;
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|_| "Choose a scene inside the project folder")?;
-        let relative = relative
-            .to_str()
-            .ok_or("Scene paths must be UTF-8")?
-            .replace('\\', "/");
-        let filename = file_name(&path);
-        let id = filename
-            .strip_suffix(".futty.scene.ron")
-            .or_else(|| filename.strip_suffix(".ron"))
-            .ok_or("Choose a scene .ron file")?
-            .to_owned();
-        if self.scenes.contains_key(&id) {
-            return Err(format!("Scene ID {id:?} is already registered").into());
-        }
-        Scene::load(&path)?;
-        self.scenes.insert(id.clone(), relative);
-        if self.start.is_empty() {
-            self.start.clone_from(&id);
-        }
-        self.validate()?;
-        Ok(id)
-    }
-}
-
-#[derive(Deserialize, Serialize, Clone)]
-#[serde(deny_unknown_fields)]
-struct Manifest {
-    format: u32,
-    scenes: SceneList,
-}
-
-#[derive(Clone)]
-pub(crate) struct Project {
-    path: PathBuf,
-    pub root: PathBuf,
-    manifest: Manifest,
-}
-
-impl Project {
-    pub fn load(path: &Path) -> Result<Self, Box<dyn Error>> {
-        let path = path.canonicalize()?;
-        let root = path.parent().ok_or("Missing project folder")?.to_path_buf();
-        let manifest: Manifest = ron::from_str(&fs::read_to_string(&path)?)?;
-        if manifest.format != 1 {
-            return Err("Unsupported Futty project format".into());
-        }
-        manifest.scenes.validate()?;
-        Ok(Self {
-            path,
-            root,
-            manifest,
-        })
-    }
-
-    fn create(path: &Path, first: &Path) -> Result<Self, Box<dyn Error>> {
-        let parent = path
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let root = parent.canonicalize()?;
-        let path = root.join(path.file_name().ok_or("Missing project filename")?);
-        let mut scenes = SceneList {
-            start: String::new(),
-            scenes: BTreeMap::new(),
-        };
-        scenes.add(&root, first)?;
-        let project = Self {
-            path,
-            root,
-            manifest: Manifest { format: 1, scenes },
-        };
-        project.save(false)?;
-        Ok(project)
-    }
-
-    fn save(&self, replace: bool) -> Result<(), Box<dyn Error>> {
-        self.list().validate()?;
-        let mut file = tempfile::NamedTempFile::new_in(&self.root)?;
-        file.write_all(ron::ser::to_string_pretty(&self.manifest, Default::default())?.as_bytes())?;
-        file.as_file().sync_all()?;
-        if replace {
-            file.persist(&self.path)?;
-        } else {
-            file.persist_noclobber(&self.path)?;
-        }
-        Ok(())
-    }
-
-    pub fn name(&self) -> &str {
-        file_name(&self.path)
-            .strip_suffix(SUFFIX)
-            .unwrap_or("Project")
-    }
-
-    pub fn list(&self) -> &SceneList {
-        &self.manifest.scenes
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn resolve(&self, id: &str) -> Result<PathBuf, Box<dyn Error>> {
-        self.list().resolve(&self.root, id)
-    }
-}
+use crate::{Action, Editor, menu_item, scene_dialog};
 
 #[derive(Clone, Copy)]
 pub(crate) enum ProjectAction {
@@ -307,14 +141,14 @@ impl Editor {
                 let Some(mut project) = self.project.clone() else {
                     return Ok(());
                 };
-                let scenes = &mut project.manifest.scenes;
+                let root = project.root.clone();
+                let scenes = project.list_mut();
                 let message = match change {
                     ProjectAction::Add => {
-                        let Some(path) = scene_dialog().set_directory(&project.root).pick_file()
-                        else {
+                        let Some(path) = scene_dialog().set_directory(&root).pick_file() else {
                             return Ok(());
                         };
-                        let id = scenes.add(&project.root, &path)?;
+                        let id = scenes.add(&root, &path)?;
                         format!("Added scene {id}")
                     }
                     ProjectAction::Edit(index)
@@ -328,8 +162,7 @@ impl Editor {
                             return Ok(());
                         }
                         if matches!(change, ProjectAction::Start(_)) {
-                            Scene::load(&scenes.resolve(&project.root, &id)?)?;
-                            scenes.start.clone_from(&id);
+                            project.set_start(&id)?;
                             format!("Start scene set to {id}")
                         } else {
                             if id == scenes.start {
@@ -353,6 +186,7 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futty_runtime::Scene;
 
     #[test]
     fn project_persists_start_and_rejects_unlisted_or_escaping_scenes() -> Result<(), Box<dyn Error>>
@@ -365,10 +199,10 @@ mod tests {
         let mut project = Project::create(&path, &first)?;
         assert!(Project::create(&path, &first).is_err());
         let second = root.join("Sub").join("Level.futty.scene.ron");
-        fs::create_dir(second.parent().unwrap())?;
+        std::fs::create_dir(second.parent().unwrap())?;
         Scene::default().save(&second)?;
-        let id = project.manifest.scenes.add(&project.root, &second)?;
-        project.manifest.scenes.start = id;
+        let id = project.list_mut().add(&root, &second)?;
+        project.list_mut().start = id;
         project.save(true)?;
         let mut project = Project::load(&path)?;
         assert_eq!(project.list().start, "Level");
@@ -382,8 +216,7 @@ mod tests {
             "Sub\\Level.ron",
         ] {
             project
-                .manifest
-                .scenes
+                .list_mut()
                 .scenes
                 .insert("Level".into(), invalid.into());
             assert!(project.save(true).is_err());

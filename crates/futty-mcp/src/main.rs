@@ -3,6 +3,7 @@ mod play;
 mod replay;
 
 use std::{
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
@@ -10,7 +11,10 @@ use std::{
 
 use authoring::{Batch, ObjectQuery, Undo, UndoRecord};
 use futty_core::{Camera, CameraLens};
-use futty_runtime::{Object, Scene};
+use futty_runtime::{
+    Object, Scene, SceneIssue,
+    project::{Project, SceneList, is_project},
+};
 use glam::Vec3;
 use play::{PlayRunner, SessionId, Start, Step};
 use replay::{PlayTest, Replay, ReplayFile, SaveReplay};
@@ -45,6 +49,33 @@ struct NewScene {
     /// New .ron scene path relative to the workspace. Its parent directory must exist.
     path: String,
     name: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct NewProject {
+    /// New workspace-relative .futty.project.ron path. Its parent must exist.
+    path: String,
+    /// Start scene ID from the scenes map.
+    start: String,
+    /// Scene IDs mapped to existing .ron paths relative to the project folder.
+    scenes: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProjectFile {
+    /// Existing workspace-relative .futty.project.ron file.
+    path: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetProjectStart {
+    /// Existing workspace-relative .futty.project.ron file.
+    path: String,
+    /// Registered scene ID.
+    start: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -202,6 +233,86 @@ impl Futty {
     }
 
     #[tool(
+        description = "Check a saved scene's format, hierarchy, settings and saved asset files without editing. Returns structured issues.",
+        annotations(read_only_hint = true)
+    )]
+    fn scene_validate(
+        &self,
+        Parameters(input): Parameters<SceneFile>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let path = self.scene_path(&input.path, true)?;
+        let issues = match Scene::load(&path) {
+            Ok(scene) => scene
+                .assets
+                .iter()
+                .filter_map(|asset| {
+                    if scene.script_sources.contains_key(&asset.id) {
+                        return None;
+                    }
+                    futty_assets::read_saved(&path, asset).err().map(|error| {
+                        json!({
+                            "field": "assets",
+                            "asset_id": asset.id,
+                            "message": error.to_string(),
+                        })
+                    })
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => vec![match error.downcast_ref::<SceneIssue>() {
+                Some(issue) => json!(issue),
+                None => json!({"field": "scene", "message": error.to_string()}),
+            }],
+        };
+        Ok(CallToolResult::structured(json!({
+            "path": input.path, "valid": issues.is_empty(), "issues": issues,
+        })))
+    }
+
+    #[tool(
+        description = "Create an editor-compatible Futty project from saved scenes. Refuses to overwrite existing files."
+    )]
+    fn project_create(
+        &self,
+        Parameters(input): Parameters<NewProject>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let path = self.project_path(&input.path, false)?;
+        let scenes = SceneList {
+            start: input.start,
+            scenes: input.scenes,
+        };
+        let project = Project::create_with_scenes(&path, scenes).map_err(io_error)?;
+        Ok(project_info(&project, &input.path))
+    }
+
+    #[tool(
+        description = "Read a Futty project's registered scene paths and current start scene.",
+        annotations(read_only_hint = true)
+    )]
+    fn project_inspect(
+        &self,
+        Parameters(input): Parameters<ProjectFile>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let path = self.project_path(&input.path, true)?;
+        let project = Project::load(&path).map_err(io_error)?;
+        Ok(project_info(&project, &input.path))
+    }
+
+    #[tool(
+        description = "Set an existing Futty project's start scene to a registered, loadable scene."
+    )]
+    fn project_set_start_scene(
+        &self,
+        Parameters(input): Parameters<SetProjectStart>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let _lock = self.lock_edits().map_err(io_error)?;
+        let path = self.project_path(&input.path, true)?;
+        let mut project = Project::load(&path).map_err(io_error)?;
+        project.set_start(&input.start).map_err(io_error)?;
+        project.save(true).map_err(io_error)?;
+        Ok(project_info(&project, &input.path))
+    }
+
+    #[tool(
         description = "List saved scene objects with UUIDs, transforms, components and asset references, optionally filtered by tag or UUID.",
         annotations(read_only_hint = true)
     )]
@@ -340,6 +451,14 @@ impl Futty {
         self.workspace_file(value, "ron", existing)
     }
 
+    fn project_path(&self, value: &str, existing: bool) -> Result<PathBuf, ErrorData> {
+        let path = self.workspace_file(value, "ron", existing)?;
+        if !is_project(Path::new(value)) || !is_project(&path) {
+            return Err(authoring::invalid("Expected a .futty.project.ron file"));
+        }
+        Ok(path)
+    }
+
     fn workspace_file(
         &self,
         value: &str,
@@ -417,6 +536,15 @@ impl Futty {
     }
 }
 
+fn project_info(project: &Project, path: &str) -> CallToolResult {
+    CallToolResult::structured(json!({
+        "path": path,
+        "name": project.name(),
+        "start": project.list().start,
+        "scenes": project.list().scenes,
+    }))
+}
+
 fn scene_info(scene: &Scene) -> CallToolResult {
     let cameras: Vec<_> = scene
         .entities
@@ -485,6 +613,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_scenes_and_persists_editor_project_start() {
+        let folder = tempfile::tempdir().unwrap();
+        let root = folder.path().canonicalize().unwrap();
+        let server = Futty::new(root.clone());
+        let scene = Scene::default();
+        scene.save_new(&root.join("first.ron")).unwrap();
+        scene.save_new(&root.join("second.ron")).unwrap();
+        let valid = server
+            .scene_validate(Parameters(SceneFile {
+                path: "first.ron".into(),
+            }))
+            .unwrap();
+        assert_eq!(valid.structured_content.unwrap()["valid"], true);
+
+        let broken = root.join("broken.ron");
+        let source = fs::read_to_string(root.join("first.ron")).unwrap();
+        let parent = Uuid::new_v4();
+        let changed = source.replacen("parent: None", &format!("parent: Some(\"{parent}\")"), 1);
+        assert_ne!(source, changed);
+        fs::write(&broken, &changed).unwrap();
+        let invalid = server
+            .scene_validate(Parameters(SceneFile {
+                path: "broken.ron".into(),
+            }))
+            .unwrap();
+        let issue = &invalid.structured_content.unwrap()["issues"][0];
+        assert_eq!(issue["field"], "parent");
+        assert_eq!(issue["object_id"], json!(scene.entities[0].uuid));
+        assert_eq!(fs::read_to_string(broken).unwrap(), changed);
+
+        let path = "Test.futty.project.ron";
+        let create = || {
+            Parameters(NewProject {
+                path: path.into(),
+                start: "first".into(),
+                scenes: [
+                    ("first".into(), "first.ron".into()),
+                    ("second".into(), "second.ron".into()),
+                ]
+                .into(),
+            })
+        };
+        server.project_create(create()).unwrap();
+        assert!(server.project_create(create()).is_err());
+        let set = |start: &str| {
+            Parameters(SetProjectStart {
+                path: path.into(),
+                start: start.into(),
+            })
+        };
+        server.project_set_start_scene(set("second")).unwrap();
+        assert!(server.project_set_start_scene(set("unknown")).is_err());
+        let inspect = server
+            .project_inspect(Parameters(ProjectFile { path: path.into() }))
+            .unwrap();
+        assert_eq!(inspect.structured_content.unwrap()["start"], "second");
+        assert_eq!(
+            Project::load(&root.join(path))
+                .unwrap()
+                .resolve("second")
+                .unwrap(),
+            root.join("second.ron")
+        );
+    }
 
     #[test]
     fn headless_test_saves_and_replays_the_first_different_tick() {

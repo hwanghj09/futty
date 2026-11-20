@@ -50,11 +50,18 @@ Futty에서 게임을 기획하고 제작하며 플레이로 검증할 때 쓸 A
 
 [자동 플레이테스트](../.agents/skills/futty-playtest/SKILL.md)와 [리플레이 디버깅](../.agents/skills/futty-replay-debug/SKILL.md)은 탈출 판정과 첫 상태 차이를 확인하는 후속 작업에 사용합니다.
 
+ABA Games의 공개 스킬을 참고해 Futty 도구로 실행할 수 있는 지침 세 가지를 추가했습니다. 각 스킬에는 참고한 원본의 커밋 링크가 있습니다.
+
+| 탑재 스킬 | 적용 작업 |
+| --- | --- |
+| [Futty 레벨 설계](../.agents/skills/futty-level-design/SKILL.md) | 목표 경로를 배치하고 우회로와 장애물 판정을 검증 |
+| [Futty 게임 피드백](../.agents/skills/futty-game-feel/SKILL.md) | 상호작용, 아이템 획득, 충돌 상태를 HUD와 시청각 효과로 전달 |
+| [Futty 밸런스 검증](../.agents/skills/futty-balance/SKILL.md) | 같은 조건에서 전략별 성공률, 소요 틱, 기록된 점수를 비교 |
+
 | 스킬 후보 | 입력 → 산출물 | 사용할 Futty 기능 |
 | --- | --- | --- |
 | `futty-game-design` | 장르·플레이 시간 → 핵심 조작, 승리·실패 조건, 규칙 문서 | 기획 템플릿과 예제 |
 | `futty-scene-authoring` | 씬 요구사항 → 오브젝트, 프리팹, 충돌체, 카메라가 들어간 씬 | MCP 씬 편집·일괄 Undo |
-| `futty-level-design` | 시작점·목표·제약 → 방·통로 배치와 경로 검사 결과 | 프리팹, 레이캐스트, 경로 검사 |
 | `futty-camera-lighting` | 시점·분위기 → 메인 카메라, Sky, 조명 배치, 캡처 | 카메라·조명, 화면 캡처 |
 | `futty-rhai-gameplay` | 규칙과 오브젝트 태그 → 스위치, 문, 아이템, 씬 전환 스크립트 | Rhai, 이벤트, 태그, 씬 전환 |
 | `futty-glb-assets` | Blender 모델 → 검증된 GLB와 씬에 연결할 UUID | GLB 임포트·재가져오기 |
@@ -66,7 +73,6 @@ Futty에서 게임을 기획하고 제작하며 플레이로 검증할 때 쓸 A
 | `futty-ai-player` | 플레이어 관찰 → 이동·시점 회전·점프·상호작용 | 관찰·행동 API, 고정 틱 진행 |
 | `futty-playtest` | 씬·시드·성공 조건 → 재현 절차, 판정, 마지막 관찰 | 헤드리스 실행, 판정 이벤트 |
 | `futty-replay-debug` | 실패 리플레이 → 처음 어긋난 틱과 관련 오브젝트 | 행동 기록, 상태 비교 |
-| `futty-balance` | 시드 묶음·플레이 스타일 → 성공률·소요시간·점수 비교 | 배치 플레이테스트와 결과 집계 |
 | `futty-windows-build` | 저장된 프로젝트 → 검사 결과와 Windows 빌드 경로 | 씬 검사, Windows 내보내기 |
 
 ## 탑재 순서

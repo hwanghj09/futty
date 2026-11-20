@@ -421,6 +421,13 @@ impl Editor {
                 } else {
                     self.report(format!("Opened {}", file_name(&path)), false);
                 }
+                if self.project.as_ref().is_some_and(|project| {
+                    path.canonicalize()
+                        .ok()
+                        .is_none_or(|path| !path.starts_with(&project.root))
+                }) {
+                    self.project = None;
+                }
                 self.doc = Document::new(scene, Some(path));
                 self.viewport.reset_camera();
                 self.show_panel(Panel::Scene);
@@ -441,18 +448,29 @@ impl Editor {
         let path = if !save_as && self.doc.path.is_some() {
             self.doc.path.clone()
         } else {
-            scene_dialog()
-                .set_file_name(format!("{}.futty.scene.ron", self.doc.scene.name))
-                .save_file()
-                .map(|path| {
-                    if path.extension().is_none() {
-                        path.with_extension("futty.scene.ron")
-                    } else {
-                        path
-                    }
-                })
+            let mut dialog =
+                scene_dialog().set_file_name(format!("{}.futty.scene.ron", self.doc.scene.name));
+            if let Some(project) = &self.project {
+                dialog = dialog.set_directory(&project.root);
+            }
+            dialog.save_file().map(|path| {
+                if path.extension().is_none() {
+                    path.with_extension("futty.scene.ron")
+                } else {
+                    path
+                }
+            })
         };
         let Some(path) = path else { return false };
+        if let Some(project) = &self.project
+            && path
+                .parent()
+                .and_then(|parent| parent.canonicalize().ok())
+                .is_none_or(|parent| !parent.starts_with(&project.root))
+        {
+            self.report("Save the scene inside the project folder", true);
+            return false;
+        }
         self.refresh_scripts();
         match self
             .save_assets(&path)

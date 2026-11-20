@@ -258,9 +258,11 @@ fn on_update(entity, dt) {
 
 ## 프로젝트와 씬 전환
 
-1. 씬을 저장한 뒤 **File → Project → New Project from Current Scene…**을 선택합니다. `.futty.project.ron`은 함께 묶을 씬의 상위 폴더에 저장합니다.
+1. **File → Project → New Project…**에서 빈 폴더를 선택합니다. Futty가 그 폴더에 프로젝트 파일과 `Main.futty.scene.ron`을 만들고 첫 씬을 엽니다. 이미 만든 씬으로 시작하려면 **New Project from Current Scene…**을 사용합니다.
 2. **Add Scene…**으로 프로젝트 폴더 안의 다른 씬을 등록합니다. **Start Scene**에서 프로젝트를 열거나 단독으로 실행할 때 처음 보여 줄 씬을 고릅니다. **Edit Scene**에서 편집할 파일을 전환합니다.
 3. 게임에서는 Rhai의 `load_scene("Pulse Range")`처럼 등록된 씬 ID를 넘겨 전환합니다. 에디터에서 등록할 때 ID는 씬 파일 이름의 확장자를 뺀 값입니다. 전환 대상의 카메라와 HUD, 스크립트를 새로 초기화합니다.
+
+프로젝트가 열려 있으면 씬을 프로젝트 폴더 안에 저장합니다. **Import…**로 가져온 이미지, 모델, 오디오, Rhai 파일은 씬을 저장할 때 그 씬 옆의 `Assets/Futty/`에 복사됩니다. 에디터에서 생성한 Rhai 스크립트는 씬 파일에 함께 저장됩니다. 프로젝트를 옮기거나 공유할 때는 선택한 프로젝트 폴더 전체를 복사합니다.
 
 에디터의 **Play**는 현재 편집 중인 씬에서 시작합니다. **Stop**을 누르면 편집 중이던 씬으로 돌아갑니다. **Remove Scene**은 프로젝트 목록에서 항목을 빼고 씬 파일은 보존합니다. 시작 씬을 제거하려면 먼저 다른 씬을 시작으로 지정합니다.
 

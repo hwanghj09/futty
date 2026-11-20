@@ -45,12 +45,18 @@ impl Prefab {
         Hierarchy::new(&self.entities)
     }
 
-    pub(crate) fn copies(&self, root: Uuid, position: Vec3, listener_exists: bool) -> Vec<Object> {
+    pub(crate) fn copies(
+        &self,
+        root: Uuid,
+        position: Vec3,
+        listener_exists: bool,
+        mut next_id: impl FnMut() -> Uuid,
+    ) -> Vec<Object> {
         let remap: HashMap<_, _> = self
             .entities
             .iter()
             .enumerate()
-            .map(|(index, object)| (object.uuid, if index == 0 { root } else { Uuid::new_v4() }))
+            .map(|(index, object)| (object.uuid, if index == 0 { root } else { next_id() }))
             .collect();
         let mut copies: Vec<_> = self
             .entities
@@ -175,7 +181,7 @@ impl Scene {
             .iter()
             .any(|object| object.audio_listener.is_some());
         let root = Uuid::new_v4();
-        let copies = prefab.copies(root, position, listener_exists);
+        let copies = prefab.copies(root, position, listener_exists, Uuid::new_v4);
         self.entities
             .extend(
                 copies

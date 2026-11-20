@@ -13,7 +13,7 @@ use rhai::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::Motion;
+use crate::{GameOutcome, Motion};
 
 type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
 pub const MAX_SCRIPT_BYTES: usize = 64 * 1024;
@@ -167,6 +167,7 @@ pub(crate) enum WorldCommand {
         value: ScriptValue,
     },
     LoadScene(String),
+    FinishGame(GameOutcome),
 }
 
 #[derive(Default)]
@@ -238,18 +239,51 @@ pub(crate) struct Scripts {
     pub(crate) tags: Rc<RefCell<HashMap<String, Vec<Uuid>>>>,
     pub(crate) prefabs: Rc<RefCell<HashMap<String, Uuid>>>,
     pub(crate) hud_clicks: Rc<RefCell<HashSet<String>>>,
+    spawn_ids: Rc<RefCell<Option<SpawnIds>>>,
+}
+
+pub(crate) struct SpawnIds {
+    seed: u32,
+    counter: u64,
+    reserved: HashSet<Uuid>,
+}
+
+impl SpawnIds {
+    pub fn new(seed: u32, reserved: impl Iterator<Item = Uuid>) -> Self {
+        Self {
+            seed,
+            counter: 0,
+            reserved: reserved.collect(),
+        }
+    }
+
+    fn next(&mut self) -> Uuid {
+        loop {
+            self.counter += 1;
+            let id = Uuid::from_u128(
+                0xf077_0000_0000_0000_0000_0000_0000_0000
+                    | (u128::from(self.seed) << 64)
+                    | u128::from(self.counter),
+            );
+            if !self.reserved.contains(&id) {
+                return id;
+            }
+        }
+    }
 }
 
 pub fn inspect_script(source: &str) -> Result<ScriptFields, String> {
-    let scripts = Scripts::new();
+    let scripts = Scripts::new(None);
     scripts
         .build_program(source)
         .map(|program| program.defaults)
 }
 
 impl Scripts {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(ids: Option<SpawnIds>) -> Self {
         let effects = Rc::new(RefCell::new(Effects::default()));
+        let spawn_ids = Rc::new(RefCell::new(ids));
+        let allocate = spawn_ids.clone();
         let mut engine = Engine::new();
         engine
             .set_max_operations(5_000)
@@ -295,6 +329,18 @@ impl Scripts {
             clicks.borrow().contains(name.as_str())
         });
         let values = effects.clone();
+        let finish = effects.clone();
+        engine.register_fn(
+            "finish_game",
+            move |value: ImmutableString| -> RhaiResult<()> {
+                let outcome = match value.as_str() {
+                    "success" => GameOutcome::Success,
+                    "failure" => GameOutcome::Failure,
+                    _ => return Err("Game result must be success or failure".into()),
+                };
+                world_command(&mut finish.borrow_mut(), WorldCommand::FinishGame(outcome))
+            },
+        );
         engine.register_fn(
             "set_hud",
             move |name: ImmutableString, value: Dynamic| -> RhaiResult<()> {
@@ -375,7 +421,10 @@ impl Scripts {
                     bounded(&y, 10_000.0)?,
                     bounded(&z, 10_000.0)?,
                 );
-                let root = Uuid::new_v4();
+                let root = allocate
+                    .borrow_mut()
+                    .as_mut()
+                    .map_or_else(Uuid::new_v4, SpawnIds::next);
                 world_command(
                     &mut spawn.borrow_mut(),
                     WorldCommand::Spawn {
@@ -496,7 +545,15 @@ impl Scripts {
             tags,
             prefabs,
             hud_clicks,
+            spawn_ids,
         }
+    }
+
+    pub(crate) fn next_spawn_id(&self) -> Uuid {
+        self.spawn_ids
+            .borrow_mut()
+            .as_mut()
+            .map_or_else(Uuid::new_v4, SpawnIds::next)
     }
 
     fn build_program(&self, source: &str) -> Result<Program, String> {

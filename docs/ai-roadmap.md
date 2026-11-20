@@ -30,7 +30,7 @@
 | --- | --- |
 | 3D 엔진 | wgpu/WGSL 렌더링, ECS, Rapier 물리, Rhai 스크립트, 오디오, GLB, 애니메이션 |
 | 게임 편집·실행 | 사람용 에디터에서 씬·프리팹·HUD·프로젝트를 편집하고 Play 및 Windows 내보내기 가능 |
-| AI용 MCP | **현재 구현된 5개 도구:** scene_create, scene_inspect, scene_set_background, scene_add_camera, scene_set_main_camera |
+| AI용 MCP | 씬 생성·조회, 오브젝트 조회와 일괄 편집·Undo, AI 관찰·행동, 헤드리스 플레이테스트와 리플레이. [사용 가이드](guide.md#codex에서-futty-mcp-사용하기) |
 | AI의 전체 게임 제작 | **미구현:** AI용 오브젝트/컴포넌트/에셋/스크립트/HUD 편집, 자동 검증·테스트·빌드 등 |
 
 아래의 도구 이름은 **제안 API**다. 구현된 5개 MCP 도구를 제외하고는 아직 존재하거나 작동한다고 가정하지 않는다. 실제 소스와 도구 정의를 확인한다.
@@ -159,3 +159,5 @@ P0의 최종 목표는 **AI의 도구 호출만으로 작지만 완성된 3D 게
 ---
 
 이 문서는 **제품 방향과 앞으로 구현할 API의 설계안**이다. 현재 실제 지원 도구는 [futty-mcp 소스](../crates/futty-mcp/src/main.rs)와 [사용 가이드](guide.md)에서 확인한다.
+
+현재 검증 예제인 [Beacon Bot Escape](../examples/agent-escape/playtest.json)는 스위치를 켜고 열린 출구를 통과하는 플레이테스트를 제공합니다. 이 테스트의 결과와 리플레이를 재사용하는 방법은 [자동 플레이테스트 가이드](guide.md#자동-플레이테스트와-리플레이), 제작과 검증에 사용할 스킬은 [게임 스킬 카탈로그](game-skills.md)에 정리했습니다.

@@ -28,7 +28,9 @@ pub use hud::{HudAnchor, HudKind, HudWidget, MAX_HUD_WIDGETS, range_hud_value};
 pub use prefab::{Prefab, PrefabLink};
 pub use range::{MAGAZINE, ROUND_SECONDS, RangeConfig, RangeInput, RangeStatus};
 
-pub use physics::{Body, CollisionLayers, Motion, PhysicsEvent, RayHit};
+pub use physics::{
+    Body, CollisionLayers, Motion, PhysicsEvent, RayHit, STEP as FIXED_STEP_SECONDS,
+};
 use physics::{MAX_STEPS, Physics, STEP};
 pub use script::{
     ActionState, GameInput, InputAction, MAX_SCRIPT_BYTES, ScriptFields, ScriptValue,
@@ -36,6 +38,13 @@ pub use script::{
 };
 use script::{Callback, MAX_WORLD_COMMANDS, Scripts, WorldCommand};
 pub use sprite::{Billboard, Sprite};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GameOutcome {
+    Success,
+    Failure,
+}
 
 type SceneResult<T> = Result<T, Box<dyn Error>>;
 
@@ -436,7 +445,11 @@ impl Scene {
     }
 
     pub fn load(path: &Path) -> SceneResult<Self> {
-        let mut scene: Self = ron::from_str(&fs::read_to_string(path)?)?;
+        Self::decode(&fs::read_to_string(path)?)
+    }
+
+    pub fn decode(source: &str) -> SceneResult<Self> {
+        let mut scene: Self = ron::from_str(source)?;
         if (1..FORMAT_VERSION).contains(&scene.format_version) {
             scene.format_version = FORMAT_VERSION;
         }
@@ -637,6 +650,7 @@ pub struct Runtime {
     stopped_audio: Vec<Uuid>,
     hud_values: BTreeMap<String, ScriptValue>,
     scene_request: Option<String>,
+    outcome: Option<GameOutcome>,
 }
 
 impl Runtime {
@@ -694,10 +708,29 @@ impl Runtime {
             stopped_audio: Vec::new(),
             hud_values: BTreeMap::new(),
             scene_request: None,
+            outcome: None,
         })
     }
 
     pub fn start_scripts(&mut self, scene: &Scene, sources: &HashMap<Uuid, String>) {
+        self.start_scripts_with_seed(scene, sources, None);
+    }
+
+    pub fn start_seeded_scripts(
+        &mut self,
+        scene: &Scene,
+        sources: &HashMap<Uuid, String>,
+        seed: u32,
+    ) {
+        self.start_scripts_with_seed(scene, sources, Some(seed));
+    }
+
+    fn start_scripts_with_seed(
+        &mut self,
+        scene: &Scene,
+        sources: &HashMap<Uuid, String>,
+        seed: Option<u32>,
+    ) {
         let referenced: HashSet<_> = scene
             .referenced_objects()
             .filter_map(|object| object.script)
@@ -705,7 +738,10 @@ impl Runtime {
         if referenced.is_empty() || self.scripts.is_some() {
             return;
         }
-        let mut scripts = Scripts::new();
+        let ids = seed.map(|seed| {
+            script::SpawnIds::new(seed, scene.entities.iter().map(|object| object.uuid))
+        });
+        let mut scripts = Scripts::new(ids);
         for (&id, prefab) in &self.prefabs {
             scripts
                 .prefabs
@@ -759,6 +795,11 @@ impl Runtime {
         }
     }
 
+    pub fn prepare_play(&mut self) {
+        self.apply_world_commands();
+        self.physics.prepare_queries();
+    }
+
     pub fn script_log(&self) -> impl DoubleEndedIterator<Item = &str> {
         self.scripts
             .iter()
@@ -767,6 +808,31 @@ impl Runtime {
 
     pub fn take_scene_request(&mut self) -> Option<String> {
         self.scene_request.take()
+    }
+
+    pub fn game_outcome(&self) -> Option<GameOutcome> {
+        self.outcome
+    }
+
+    pub fn look_character(&mut self, id: Uuid, yaw_degrees: f32, pitch_degrees: f32) -> bool {
+        if !yaw_degrees.is_finite() || !pitch_degrees.is_finite() {
+            return false;
+        }
+        let Some(mut object) = self
+            .objects
+            .iter_mut(&mut self.world)
+            .find(|object| object.uuid == id && object.character.is_some())
+        else {
+            return false;
+        };
+        let forward = object.transform.rotation * Vec3::NEG_Z;
+        let yaw = forward.x.atan2(-forward.z) + yaw_degrees.to_radians();
+        let limit = 89.0_f32.to_radians();
+        let pitch =
+            (forward.y.clamp(-1.0, 1.0).asin() + pitch_degrees.to_radians()).clamp(-limit, limit);
+        object.transform.rotation =
+            (Quat::from_rotation_y(-yaw) * Quat::from_rotation_x(pitch)).normalize();
+        true
     }
 
     pub fn log_scene_error(&mut self, message: String) {
@@ -849,6 +915,9 @@ impl Runtime {
                 WorldCommand::LoadScene(id) => {
                     self.scene_request.get_or_insert(id);
                 }
+                WorldCommand::FinishGame(outcome) => {
+                    self.outcome.get_or_insert(outcome);
+                }
             }
         }
         self.scripts = Some(scripts);
@@ -862,7 +931,7 @@ impl Runtime {
             scripts.push("Runtime prefab limit reached (1024 objects)".into());
             return;
         }
-        let copies = prefab.copies(root, position, true);
+        let copies = prefab.copies(root, position, true, || scripts.next_spawn_id());
         let mut branch = Vec::with_capacity(copies.len());
         for object in &copies {
             let entity = self
@@ -1101,6 +1170,42 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeded_runs_assign_identical_ids_to_the_whole_spawned_branch() {
+        let mut scene = Scene::default();
+        let root = scene.entities[0].uuid;
+        let mut child = Object::cube("Child".into(), Vec3::Y);
+        child.parent = Some(root);
+        scene.entities.push(child);
+        scene.create_prefab(root).unwrap();
+        let script = Uuid::new_v4();
+        scene.assets.push(Asset {
+            id: script,
+            name: "Spawner".into(),
+            kind: AssetKind::Script,
+        });
+        scene.script_sources.insert(
+            script,
+            r#"fn on_start(entity) { spawn_prefab("Cube", 1, 0, 0); }"#.into(),
+        );
+        scene.entities[0].script = Some(script);
+        let ids = |seed| {
+            let mut runtime = Runtime::new(&scene).unwrap();
+            runtime.start_seeded_scripts(&scene, &HashMap::new(), seed);
+            runtime.prepare_play();
+            runtime
+                .spawned_objects()
+                .iter()
+                .map(|object| (object.uuid, object.parent))
+                .collect::<Vec<_>>()
+        };
+        let first = ids(7);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[1].1, Some(first[0].0));
+        assert_eq!(first, ids(7));
+        assert_ne!(first, ids(8));
+    }
 
     #[test]
     fn hud_layout_round_trips_and_button_dispatches_one_script_click() {

@@ -97,17 +97,79 @@ GLB의 이동·회전·스케일 채널과 Linear·Step·Cubic Spline 보간을 
 
 ## Codex에서 Futty MCP 사용하기
 
-Windows에서 프로젝트 루트의 PowerShell을 열고 서버를 빌드한 뒤 Codex에 등록합니다.
+GitHub에서 저장소를 클론하거나 **Code → Download ZIP**으로 받아 압축을 풉니다. Codex에서 Futty 폴더를 열고 **“Futty MCP 연결해줘”**라고 입력하면 저장소의 `AGENTS.md`에 따라 설치 스크립트를 실행합니다.
+
+Windows에서 직접 연결하려면 저장소 루트의 PowerShell에서 같은 스크립트를 실행합니다. Codex CLI, rustup, Visual Studio Build Tools의 **Desktop development with C++** 워크로드가 필요합니다. 프로젝트의 Rust 버전은 `rust-toolchain.toml`에 지정되어 있습니다.
 
 ```powershell
-cargo build --locked -p futty-mcp
-$workspace = (Resolve-Path .).Path
-codex mcp add futty -- "$workspace\target\debug\futty-mcp.exe" "$workspace"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1
 ```
+
+스크립트는 서버를 빌드하고 현재 폴더를 작업 경로로 지정해 Codex의 `futty` 등록을 갱신합니다. 열려 있는 세션에서 도구가 보이지 않으면 새 채팅을 시작하거나 Codex를 다시 실행합니다.
 
 - `scene_create`와 `scene_inspect`로 씬을 만들고 배경, 오브젝트 수, 카메라 UUID를 확인합니다.
 - `scene_set_background`로 `sky` 또는 `solid`를 저장합니다. `scene_add_camera`로 위치와 바라볼 점을 지정하고 `scene_set_main_camera`에 카메라 UUID를 넘겨 게임 카메라를 선택합니다.
+- `scene_objects`는 오브젝트 UUID, 태그, 부모, 로컬 Transform, 컴포넌트와 에셋 참조를 반환합니다. `tag`, `object_id`, `offset`, `limit`으로 범위를 좁힐 수 있습니다.
+- `scene_apply`는 한 씬에 최대 64개의 편집을 순서대로 적용해 한 번에 저장합니다. 배치에서 만든 오브젝트의 `key`는 뒤에 나오는 작업의 `object`나 `parent`에서 사용할 수 있습니다. 작업이 실패하면 이전 씬 파일이 유지됩니다.
+- `scene_undo`에는 `path`와 `scene_apply`가 반환한 `undo_token`을 사용합니다. 이 MCP 세션의 가장 최근 배치를 되돌릴 수 있으며, 이후 씬 내용이 바뀐 경우 오류를 반환합니다.
 - 경로는 등록한 Futty 폴더 기준의 상대 `.ron` 경로를 사용합니다. 에디터에서 열린 씬은 MCP 편집 전에 저장하고 닫은 뒤, 편집이 끝나면 다시 엽니다.
+
+| `scene_apply` 작업 | 하는 일 |
+| --- | --- |
+| `add_object`, `edit_object` | 도형을 추가하고 이름, 태그, 위치, XYZ 회전 각도, 크기, 색, 콜라이더를 설정합니다. |
+| `add_camera`, `add_point_light` | 바라볼 점을 지정한 카메라와 점광원을 추가합니다. `character: true`인 카메라는 이동 입력을 받습니다. |
+| `set_parent`, `remove_leaf` | 로컬 Transform을 유지하며 부모를 바꾸거나, 자식과 프리팹 링크가 없는 오브젝트를 삭제합니다. |
+| `place_prefab`, `attach_asset` | 등록된 프리팹을 배치하거나 모델·텍스처·스크립트 UUID를 연결합니다. |
+| `set_script`, `add_hud_text` | Rhai 소스를 검사해 연결하거나 텍스트 HUD와 값 바인딩을 추가합니다. |
+
+바닥을 만들고 태그를 지정하는 `scene_apply` 입력 예시입니다.
+
+```json
+{
+  "path": "examples/room.futty.scene.ron",
+  "edits": [
+    {"op": "add_object", "key": "floor", "name": "Floor", "properties": {
+      "position": [0, -0.1, 0], "scale": [6, 0.2, 10], "collider": "fixed"
+    }},
+    {"op": "edit_object", "object": "floor", "properties": {"tags": ["room-floor"]}}
+  ]
+}
+```
+
+[Beacon Bot Escape](../examples/agent-escape/Beacon%20Bot%20Escape.futty.scene.ron)에서 조작할 수 있는 카메라, 고정 충돌체, Rhai 스위치와 문, 목표 HUD를 확인할 수 있습니다. **Play**를 누르고 **W**로 전진해 주황색 스위치 옆에서 **E**를 누른 뒤, 열린 문을 지나면 됩니다.
+
+## AI 플레이 세션
+
+Futty MCP의 플레이 도구는 저장된 씬에서 창 없이 게임을 실행합니다. 메인 카메라에 캐릭터 컨트롤러가 있어야 합니다. 다음은 [Beacon Bot Escape](../examples/agent-escape/Beacon%20Bot%20Escape.futty.scene.ron)의 시작 입력입니다.
+
+```json
+{"path":"examples/agent-escape/Beacon Bot Escape.futty.scene.ron","max_ticks":600}
+```
+
+| 도구 | 입력과 결과 |
+| --- | --- |
+| `play_start` | 씬 경로와 선택적인 `max_ticks`를 받습니다. 세션 ID와 0틱의 관찰을 반환합니다. |
+| `play_observe` | `session_id`의 현재 틱, 플레이어 위치와 방향, HUD 값, 보이는 오브젝트, 상태를 읽습니다. |
+| `play_step` | `session_id`, `actions`, 선택적인 `ticks`, `look`, `expected_tick`을 사용합니다. 실행 후 새 관찰을 반환합니다. |
+| `play_end` | 세션을 닫고 종료 시점의 틱과 상태를 반환합니다. 씬 파일은 그대로입니다. |
+
+`actions`는 `forward`, `backward`, `left`, `right`, `jump`, `interact`입니다. 빈 목록으로 대기합니다. `ticks`는 호출당 1~120이며 한 틱은 1/60초입니다. 행동이 새로 들어온 틱에만 누름으로 처리됩니다. 한 번 더 점프하거나 상호작용하려면 먼저 해당 행동을 뺀 스텝을 실행합니다. `look`의 첫 값은 좌우, 두 번째는 상하 회전 각도이며 양수는 오른쪽과 위쪽으로 돌립니다.
+
+`visible_objects`는 카메라의 16:9 시야에 들어오고 중심점으로 향하는 레이가 콜라이더에 가려지지 않은 오브젝트를 가까운 순서로 최대 32개 반환합니다. HUD에는 씬에 등록한 텍스트·게이지 바인딩의 현재 값이 들어갑니다.
+
+Rhai의 `finish_game("success")` 또는 `finish_game("failure")`로 플레이 결과를 지정합니다. 제한에 도달하면 `tick_limit`이 반환됩니다. 현재 세션은 단일 씬에서 실행하며, `load_scene()` 요청이 있으면 `scene_transition`과 대상 ID를 반환하고 진행을 멈춥니다. Pulse Range 전용 입력을 쓰는 씬은 에디터나 단독 게임에서 실행합니다.
+
+## 자동 플레이테스트와 리플레이
+
+| 도구 | 사용 방법 |
+| --- | --- |
+| `play_test` | `path`, `steps`, 선택적인 `seed`, `max_ticks`, `expect`를 넣습니다. 단계마다 `actions`, `ticks`, `look`을 사용할 수 있습니다. 기대 상태의 기본값은 `success`입니다. 결과는 `passed`, 실제 상태, 틱, 마지막 관찰입니다. |
+| `play_save_replay` | 진행 중이거나 종료된 세션에서 `session_id`와 새 `.json` 경로를 지정합니다. 세션을 닫기 전에 저장합니다. |
+| `play_replay` | 기록의 `.json` 경로를 넘기면 같은 입력을 재실행합니다. 일치 여부를 반환하고, 결과가 달라지면 첫 번째 틱과 두 시점의 플레이어 위치·상태를 반환합니다. |
+
+[Beacon Bot Escape 플레이테스트 입력](../examples/agent-escape/playtest.json)을 `play_test`에 넘기면 스위치를 켜고 문을 통과하는 경로를 검사합니다. 테스트에서 바로 리플레이를 남기려면 `"replay_path":"target/escape.replay.json"`을 추가합니다. 저장할 폴더는 이미 있어야 하며 같은 이름의 파일은 보존됩니다.
+
+리플레이는 포맷·엔진 버전, 씬 경로, 씬과 스크립트의 지문, 시드, 행동, 틱별 상태 검증값을 저장합니다. 시드는 플레이 중 생성되는 프리팹 ID에 적용되며, `play_start`에서도 지정할 수 있습니다. 같은 엔진과 실행 환경에서 비교합니다. 씬이나 스크립트가 바뀌면 `source_changed`가, 기록의 상태와 재실행이 처음 어긋나면 `state_changed`가 반환됩니다.
 
 ## Pulse Range
 

@@ -1,0 +1,11 @@
+{
+  "path": "examples/agent-escape/Beacon Bot Escape.futty.scene.ron",
+  "seed": 42,
+  "max_ticks": 240,
+  "expect": "success",
+  "steps": [
+    {"actions": ["forward"], "ticks": 48},
+    {"actions": ["interact"], "ticks": 4},
+    {"actions": ["forward"], "ticks": 120}
+  ]
+}

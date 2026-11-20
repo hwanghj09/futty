@@ -7,7 +7,7 @@ use rapier3d::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub(crate) const STEP: f32 = 1.0 / 60.0;
+pub const STEP: f32 = 1.0 / 60.0;
 pub(crate) const MAX_STEPS: usize = 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +220,11 @@ impl Physics {
         }
     }
 
+    pub(crate) fn prepare_queries(&mut self) {
+        self.world.detect_collisions(&(), &self.collector);
+        self.prepared = true;
+    }
+
     pub(crate) fn step(&mut self) {
         self.recent.clear();
         self.world.step_with_events(&(), &self.collector);
@@ -311,7 +316,12 @@ impl Physics {
         }
         let [radius, height] = size;
         let capsule = Capsule::new_y(height * 0.5 - radius, radius);
-        let result = KinematicCharacterController::default().move_shape(
+        let controller = KinematicCharacterController {
+            // Leave enough separation for the next cast when the capsule touches a wall and floor.
+            normal_nudge_factor: 0.001,
+            ..Default::default()
+        };
+        let result = controller.move_shape(
             dt,
             &self.world.query_pipeline_with_filter(query_filter(mask)),
             &capsule,

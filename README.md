@@ -47,7 +47,7 @@ cargo run --locked -p futty-editor -- --edit "examples/pulse-range/Pulse Range.f
 | 에셋 | GLB 메시·스켈레톤 애니메이션·UUID 유지 재가져오기, PNG 텍스처, 공유 머티리얼, Sprite3D, WAV·Ogg 효과음 |
 | 게임 실행 | ECS 런타임, Rapier 물리, Rhai 스크립트, Windows 게임 내보내기 |
 | 프로젝트 | 시작 씬 지정, 런타임 씬 전환, 여러 씬을 묶은 Windows 빌드 |
-| 자동화 | Codex에서 로컬 MCP로 씬 생성·조회, Sky 전환, 카메라 추가·선택 |
+| 자동화 | 로컬 MCP 씬 조회·일괄 편집·Undo, 고정 틱 AI 플레이, 헤드리스 플레이테스트와 리플레이 |
 
 ## 예제
 
@@ -55,6 +55,7 @@ cargo run --locked -p futty-editor -- --edit "examples/pulse-range/Pulse Range.f
 | --- | --- |
 | [Pulse Range](examples/pulse-range/) | 연습장 씬을 바로 열거나 프로젝트를 열어 로비에서 시작 |
 | [Beacon Bot](examples/animation-playground/Beacon%20Bot.futty.scene.ron) | 씬을 열고 **Play**를 눌러 Idle·Walk·Signal 전환 |
+| [Beacon Bot Escape](examples/agent-escape/Beacon%20Bot%20Escape.futty.scene.ron) | 에디터와 MCP에서 스위치를 켜 출구를 통과하거나 [플레이테스트 입력](examples/agent-escape/playtest.json)으로 성공 판정 확인 |
 | [Prefab Workshop](examples/prefab-playground/Prefab%20Workshop.futty.scene.ron) | 원본을 편집해 인스턴스 갱신과 오버라이드 확인 |
 | [Workshop GLB와 텍스처](examples/asset-preview/) | **Project → Import…**에서 GLB와 PNG 가져오기 |
 | [Rhai 이동](examples/script-playground/) | **File → Script Playground** |
@@ -65,8 +66,9 @@ cargo run --locked -p futty-editor -- --edit "examples/pulse-range/Pulse Range.f
 ## 문서
 
 - [Futty AI-first 게임 제작 로드맵](docs/ai-roadmap.md)
+- [게임 스킬 카탈로그](docs/game-skills.md)
 - [에디터 사용 가이드](docs/guide.md)
-- [Codex에서 Futty MCP 연결](docs/guide.md#codex에서-futty-mcp-사용하기)
+- [Codex에서 Futty MCP 연결](docs/guide.md#codex에서-futty-mcp-사용하기) · GitHub에서 클론하거나 ZIP을 푼 뒤 Codex에서 폴더를 열고 **“Futty MCP 연결해줘”**라고 입력하세요.
 - [Windows 게임 내보내기](docs/guide.md#windows-게임-내보내기)
 
 ## 저장소 구조

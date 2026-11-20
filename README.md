@@ -8,13 +8,28 @@
 
 ![Futty Editor에서 Pulse Range를 연 화면. 왼쪽에 오브젝트 계층과 1인칭 미리보기, 오른쪽에 3D 뷰포트와 카메라 속성이 보입니다.](docs/images/futty-editor.jpg)
 
-## AI에서 Futty 사용하기 (현재 MCP)
+## Codex로 Futty 설치 및 MCP 연결
 
-현재 MCP는 씬 생성·조회, 배경 변경, 카메라 추가·선택을 지원합니다. 오브젝트/컴포넌트/에셋/스크립트/HUD 전체 편집과 게임 자동 테스트·빌드 API는 아직 구현할 예정입니다. Windows에서 Rust/MSVC를 설치한 뒤 MCP 서버를 빌드하고 Codex에 연결할 수 있습니다.
+Windows에서 Futty를 처음 쓰려면 아래 프롬프트를 복사해 Codex 채팅에 붙여넣으세요.
 
-1. cargo build --locked -p futty-mcp
-2. PowerShell에서 $workspace = (Resolve-Path .).Path 실행
-3. codex mcp add futty -- "$workspace\target\debug\futty-mcp.exe" "$workspace"
+```text
+내 Windows PC에 Futty를 설치하고 이 Codex에 Futty MCP를 연결해줘.
+명령을 설명하는 데 그치지 말고 직접 실행해서 등록과 연결 확인까지 진행해줘.
+
+1. https://github.com/hwanghj09/futty.git 를 새 futty 폴더에 클론해줘.
+   이미 이 저장소를 받은 폴더가 있으면 그 사본을 사용하고, 기존 파일은 덮어쓰지 마.
+2. Futty 폴더의 AGENTS.md와 rust-toolchain.toml을 읽어줘. Codex CLI, Rustup,
+   Visual Studio C++ Build Tools(MSVC 및 Windows SDK)를 확인하고, 빠진 도구가
+   있으면 설치 가능한 범위에서 설치해줘. 관리자 승인이나 재시작이 필요한 단계만 알려줘.
+3. Futty 저장소 루트에서 아래 명령을 실행해서 서버를 빌드하고, 현재 Futty 폴더를
+   작업 경로로 지정해 futty라는 이름으로 Codex MCP에 등록해줘.
+   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1
+4. codex mcp get futty로 등록된 실행 파일과 작업 경로를 확인해줘.
+   MCP 도구가 보이면 scene_inspect로 examples/agent-escape/Beacon Bot Escape.futty.scene.ron
+   파일을 조회해 실제 응답을 확인해줘. 현재 채팅에 등록이 반영되지 않으면
+   등록 결과를 보고하고 새 채팅이나 Codex 재시작이 필요한지 알려줘.
+5. 마지막에 설치 경로와 등록 여부, 예제 씬 조회 결과를 알려줘.
+```
 
 [MCP 연결 상세 가이드](docs/guide.md#codex에서-futty-mcp-사용하기) · [AI-first 개발 로드맵](docs/ai-roadmap.md)
 

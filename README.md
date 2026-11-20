@@ -6,6 +6,8 @@ Futty는 **AI 에이전트가 MCP로 3D 게임을 만들고 검증할 수 있도
 
 **처음 시작하나요?** [사람용 시작 안내](#사람용-시작-안내) · [AI 에이전트용 작업 절차](#ai-에이전트용-작업-절차) · [ZIP 다운로드](https://github.com/hwanghj09/futty/archive/refs/heads/main.zip)
 
+**[Windows x64 에디터 EXE 다운로드](https://github.com/hwanghj09/futty/raw/refs/heads/main/dist/futty-editor.exe)** · 다운로드한 `futty-editor.exe`를 더블클릭하면 에디터가 열립니다.
+
 ![Futty Editor에서 Pulse Range를 연 화면. 왼쪽에 오브젝트 계층과 1인칭 미리보기, 오른쪽에 3D 뷰포트와 카메라 속성이 보입니다.](docs/images/futty-editor.jpg)
 
 ## 사람용 시작 안내
@@ -18,7 +20,9 @@ Futty는 **AI 에이전트가 MCP로 3D 게임을 만들고 검증할 수 있도
 
 ### Windows에서 에디터 실행
 
-Windows x64에서 Git, Rustup, Visual Studio C++ Build Tools의 **MSVC**와 **Windows SDK**가 필요합니다. Rust 버전은 `rust-toolchain.toml`에 고정되어 있습니다.
+[Windows x64 실행 파일](https://github.com/hwanghj09/futty/raw/refs/heads/main/dist/futty-editor.exe)을 내려받아 실행하세요. 예제도 열어 보려면 [저장소 ZIP](https://github.com/hwanghj09/futty/archive/refs/heads/main.zip)을 풀고, 에디터에서 **File → Open Scene…**으로 `examples` 폴더의 씬 파일을 엽니다.
+
+소스에서 빌드할 때는 Git, Rustup, Visual Studio C++ Build Tools의 **MSVC**와 **Windows SDK**가 필요합니다. Rust 버전은 `rust-toolchain.toml`에 고정되어 있습니다.
 
 ```powershell
 git clone https://github.com/hwanghj09/futty.git

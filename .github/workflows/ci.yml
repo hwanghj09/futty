@@ -12,3 +12,10 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
       - run: cargo build --locked --workspace --release
+      - name: Upload Windows editor
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: futty-editor-windows-x64
+          path: target/release/futty-editor.exe
+          if-no-files-found: error

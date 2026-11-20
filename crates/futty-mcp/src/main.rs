@@ -1,6 +1,10 @@
+mod assets;
 mod authoring;
+mod components;
+mod interface;
 mod play;
 mod replay;
+mod scripts;
 
 use std::{
     collections::BTreeMap,
@@ -9,13 +13,16 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use authoring::{Batch, ObjectQuery, Undo, UndoRecord};
-use futty_core::{Camera, CameraLens};
+use assets::{CreateMaterial, ImportAsset, ReimportAsset, UpdateMaterial};
+use authoring::{Batch, ObjectQuery, Undo, UndoRecord, invalid};
+use components::ComponentQuery;
+use futty_core::{Asset, AssetKind, Camera, CameraLens};
 use futty_runtime::{
-    Object, Scene, SceneIssue,
+    HudWidget, InputAction, InputProfile, Material, Object, Scene, SceneIssue,
     project::{Project, SceneList, is_project},
 };
 use glam::Vec3;
+use interface::{BindHud, CreateHud, SetInput, UpdateHud};
 use play::{PlayRunner, SessionId, Start, Step};
 use replay::{PlayTest, Replay, ReplayFile, SaveReplay};
 use rmcp::{
@@ -25,6 +32,7 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
 };
+use scripts::{AttachScript, CreateScript, ScriptQuery, UpdateScript, ValidateScript};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -326,7 +334,333 @@ impl Futty {
     }
 
     #[tool(
-        description = "Apply up to 64 ordered edits to a saved scene atomically. New objects can be referenced by key within the batch. Returns an undo token for the latest successful changed batch in this server session."
+        description = "List a saved scene's registered assets and shared materials.",
+        annotations(read_only_hint = true)
+    )]
+    fn asset_list(
+        &self,
+        Parameters(input): Parameters<SceneFile>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let scene = Scene::load(&self.scene_path(&input.path, true)?).map_err(io_error)?;
+        Ok(CallToolResult::structured(
+            json!({"assets": scene.assets, "materials": scene.materials}),
+        ))
+    }
+
+    #[tool(
+        description = "Validate and copy a workspace GLB, PNG, WAV or Ogg file into a saved scene's assets."
+    )]
+    fn asset_import(
+        &self,
+        Parameters(input): Parameters<ImportAsset>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let _lock = self.lock_edits().map_err(io_error)?;
+        let path = self.scene_path(&input.path, true)?;
+        let mut scene = Scene::load(&path).map_err(io_error)?;
+        let (source, kind) = self.asset_source(&input.source)?;
+        let asset = Asset {
+            id: Uuid::new_v4(),
+            name: Path::new(&input.source)
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Asset")
+                .into(),
+            kind,
+        };
+        let bytes = futty_assets::read(&source).map_err(io_error)?;
+        assets::validate_asset(&scene, &asset, &bytes)?;
+        let saved = futty_assets::save_new(&path, &asset, &bytes).map_err(io_error)?;
+        scene.assets.push(asset.clone());
+        if let Err(error) = scene.save(&path) {
+            if let Err(cleanup) = fs::remove_file(&saved) {
+                return Err(io_error(format!(
+                    "{error}; could not remove the unregistered asset: {cleanup}"
+                )));
+            }
+            return Err(io_error(error));
+        }
+        Ok(CallToolResult::structured(json!({"asset":asset})))
+    }
+
+    #[tool(
+        description = "Replace a saved GLB, PNG, WAV or Ogg with a validated file of the same kind, preserving its UUID."
+    )]
+    fn asset_reimport(
+        &self,
+        Parameters(input): Parameters<ReimportAsset>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let _lock = self.lock_edits().map_err(io_error)?;
+        let path = self.scene_path(&input.path, true)?;
+        let scene = Scene::load(&path).map_err(io_error)?;
+        let asset = scene
+            .assets
+            .iter()
+            .find(|asset| asset.id == input.asset_id)
+            .ok_or_else(|| invalid(format!("Unknown asset {}", input.asset_id)))?;
+        let (source, kind) = self.asset_source(&input.source)?;
+        if kind != asset.kind {
+            return Err(invalid(
+                "The replacement must match the registered asset kind",
+            ));
+        }
+        let expected = match futty_assets::read_saved(&path, asset) {
+            Ok(bytes) => Some(bytes),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                None
+            }
+            Err(error) => return Err(io_error(error)),
+        };
+        let bytes = futty_assets::read(&source).map_err(io_error)?;
+        assets::validate_asset(&scene, asset, &bytes)?;
+        futty_assets::replace_saved(&path, asset, expected.as_deref(), &bytes).map_err(io_error)?;
+        Ok(CallToolResult::structured(json!({"asset":asset})))
+    }
+
+    #[tool(
+        description = "Create a shared material in a saved scene. Omitted settings use engine defaults."
+    )]
+    fn material_create(
+        &self,
+        Parameters(input): Parameters<CreateMaterial>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.edit_scene(&input.path, |scene| {
+            let mut material = Material::default();
+            input.settings.apply(&mut material);
+            let id = Uuid::new_v4();
+            let result =
+                CallToolResult::structured(json!({"material_id": id,"material": material}));
+            scene.materials.insert(id, material);
+            Ok(result)
+        })
+    }
+
+    #[tool(
+        description = "Update selected settings of a shared material without changing its UUID."
+    )]
+    fn material_update(
+        &self,
+        Parameters(input): Parameters<UpdateMaterial>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.edit_scene(&input.path, |scene| {
+            let material = scene
+                .materials
+                .get_mut(&input.material_id)
+                .ok_or_else(|| invalid(format!("Unknown material {}", input.material_id)))?;
+            input.settings.apply(material);
+            Ok(CallToolResult::structured(
+                json!({"material_id": input.material_id,"material": material}),
+            ))
+        })
+    }
+
+    #[tool(
+        description = "Compile inline Rhai source or a workspace .rhai file and report fields or an issue with line and column.",
+        annotations(read_only_hint = true)
+    )]
+    fn script_validate(
+        &self,
+        Parameters(input): Parameters<ValidateScript>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let source = match (input.source, &input.path) {
+            (Some(source), None) => source,
+            (None, Some(path)) => {
+                let path = self.workspace_file(path, "rhai", true)?;
+                let bytes = futty_assets::read(&path).map_err(io_error)?;
+                futty_assets::script_source(&bytes)
+                    .map_err(invalid)?
+                    .to_owned()
+            }
+            _ => return Err(invalid("Provide either source or path")),
+        };
+        let result = match futty_runtime::inspect_script_diagnostic(&source) {
+            Ok(fields) => json!({"valid":true,"path":input.path,"fields":fields,"issues":[]}),
+            Err(issue) => json!({"valid":false,"path":input.path,"issues":[issue]}),
+        };
+        Ok(CallToolResult::structured(result))
+    }
+
+    #[tool(
+        description = "Read a registered Rhai script by UUID, including embedded source or its saved source file.",
+        annotations(read_only_hint = true)
+    )]
+    fn script_get(
+        &self,
+        Parameters(input): Parameters<ScriptQuery>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let path = self.scene_path(&input.path, true)?;
+        let scene = Scene::load(&path).map_err(io_error)?;
+        let asset = scripts::get_asset(&scene, input.script_id)?;
+        let embedded = scene.script_sources.get(&asset.id);
+        let bytes;
+        let source = if let Some(source) = embedded {
+            source.as_str()
+        } else {
+            bytes = futty_assets::read_saved(&path, asset).map_err(io_error)?;
+            futty_assets::script_source(&bytes).map_err(invalid)?
+        };
+        Ok(CallToolResult::structured(json!({
+            "script_id": asset.id, "name": asset.name, "source": source, "embedded": embedded.is_some(),
+        })))
+    }
+
+    #[tool(description = "Validate and register a new embedded Rhai script in a saved scene.")]
+    fn script_create(
+        &self,
+        Parameters(input): Parameters<CreateScript>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let name = input.name.trim();
+        if name.is_empty() || name.len() > 256 {
+            return Err(invalid("Script name must contain 1 to 256 bytes"));
+        }
+        self.edit_scene(&input.path, |scene| {
+            let fields = scripts::check(&input.source, &input.path, None)?;
+            let id = scripts::register(scene, name.into(), input.source);
+            Ok(CallToolResult::structured(
+                json!({"script_id":id,"name":name,"fields":fields}),
+            ))
+        })
+    }
+
+    #[tool(
+        description = "Validate and save new embedded source for a registered Rhai script, preserving the UUID and object bindings."
+    )]
+    fn script_update(
+        &self,
+        Parameters(input): Parameters<UpdateScript>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.edit_scene(&input.path, |scene| {
+            scripts::get_asset(scene, input.script_id)?;
+            let fields = scripts::check(&input.source, &input.path, Some(input.script_id))?;
+            scene.script_sources.insert(input.script_id, input.source);
+            Ok(CallToolResult::structured(
+                json!({"script_id":input.script_id,"fields":fields}),
+            ))
+        })
+    }
+
+    #[tool(
+        description = "Attach a registered Rhai script to an object or detach it. Returns an undo token for a changed scene."
+    )]
+    fn script_attach(
+        &self,
+        Parameters(input): Parameters<AttachScript>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.scene_apply(Parameters(Batch::attach_script(input)))
+    }
+
+    #[tool(
+        description = "Read saved scene input overrides and built-in action defaults.",
+        annotations(read_only_hint = true)
+    )]
+    fn input_get(
+        &self,
+        Parameters(input): Parameters<SceneFile>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let scene = Scene::load(&self.scene_path(&input.path, true)?).map_err(io_error)?;
+        let defaults = InputAction::ALL
+            .into_iter()
+            .map(|action| (action.name(), action.default_binding()))
+            .collect::<BTreeMap<_, _>>();
+        Ok(CallToolResult::structured(json!({
+            "path": input.path, "input": scene.input, "defaults": defaults, "default_sensitivity": 1.0,
+        })))
+    }
+
+    #[tool(
+        description = "Replace the scene's input overrides. Unspecified actions and sensitivity use the player's settings."
+    )]
+    fn input_set(
+        &self,
+        Parameters(input): Parameters<SetInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let profile = InputProfile {
+            bindings: input.bindings,
+            sensitivity: input.sensitivity,
+        };
+        profile.validate().map_err(invalid)?;
+        self.edit_scene(&input.path, |scene| {
+            scene.input = profile;
+            Ok(CallToolResult::structured(
+                json!({"path": input.path, "input": scene.input}),
+            ))
+        })
+    }
+
+    #[tool(
+        description = "List HUD widgets in drawing order for a saved scene.",
+        annotations(read_only_hint = true)
+    )]
+    fn hud_list(
+        &self,
+        Parameters(input): Parameters<SceneFile>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let scene = Scene::load(&self.scene_path(&input.path, true)?).map_err(io_error)?;
+        Ok(CallToolResult::structured(json!({"widgets": scene.hud})))
+    }
+
+    #[tool(description = "Add a Text, Image, Button or Gauge widget to a saved scene.")]
+    fn hud_create(
+        &self,
+        Parameters(input): Parameters<CreateHud>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.edit_scene(&input.path, |scene| {
+            let mut widget = HudWidget::new(input.kind);
+            input.settings.apply(&mut widget);
+            let result = CallToolResult::structured(json!({"widget": widget}));
+            scene.hud.push(widget);
+            Ok(result)
+        })
+    }
+
+    #[tool(
+        description = "Update selected widget settings while retaining the widget UUID and draw order."
+    )]
+    fn hud_update(
+        &self,
+        Parameters(input): Parameters<UpdateHud>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.edit_hud(&input.path, input.widget_id, |widget| {
+            input.settings.apply(widget)
+        })
+    }
+
+    #[tool(description = "Bind a HUD widget to a Rhai value key or button action.")]
+    fn hud_bind(
+        &self,
+        Parameters(input): Parameters<BindHud>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.edit_hud(&input.path, input.widget_id, |widget| {
+            widget.binding = input.binding
+        })
+    }
+
+    #[tool(
+        description = "Read an object's light, body or character component from a saved scene. Returns null when absent.",
+        annotations(read_only_hint = true)
+    )]
+    fn component_get(
+        &self,
+        Parameters(input): Parameters<ComponentQuery>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let path = self.scene_path(&input.path, true)?;
+        let scene = Scene::load(&path).map_err(io_error)?;
+        let object = scene
+            .entities
+            .iter()
+            .find(|object| object.uuid == input.object_id)
+            .ok_or_else(|| authoring::invalid(format!("Unknown object {}", input.object_id)))?;
+        Ok(CallToolResult::structured(json!({
+            "object_id": object.uuid,
+            "value": input.component.read(object),
+        })))
+    }
+
+    #[tool(
+        description = "Apply up to 64 ordered edits to a saved scene atomically, including setting or removing components. New objects can be referenced by key within the batch. Returns an undo token for the latest successful changed batch in this server session."
     )]
     fn scene_apply(
         &self,
@@ -451,6 +785,17 @@ impl Futty {
         self.workspace_file(value, "ron", existing)
     }
 
+    fn asset_source(&self, value: &str) -> Result<(PathBuf, AssetKind), ErrorData> {
+        let kind = futty_assets::kind(Path::new(value))
+            .filter(|kind| *kind != AssetKind::Script)
+            .ok_or_else(|| invalid("Choose a workspace-relative GLB, PNG, WAV or Ogg file"))?;
+        let extension = Path::new(value)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or(kind.extension());
+        Ok((self.workspace_file(value, extension, true)?, kind))
+    }
+
     fn project_path(&self, value: &str, existing: bool) -> Result<PathBuf, ErrorData> {
         let path = self.workspace_file(value, "ron", existing)?;
         if !is_project(Path::new(value)) || !is_project(&path) {
@@ -520,6 +865,23 @@ impl Futty {
         let result = edit(&mut scene)?;
         scene.save(&path).map_err(io_error)?;
         Ok(result)
+    }
+
+    fn edit_hud(
+        &self,
+        path: &str,
+        id: Uuid,
+        edit: impl FnOnce(&mut HudWidget),
+    ) -> Result<CallToolResult, ErrorData> {
+        self.edit_scene(path, |scene| {
+            let widget = scene
+                .hud
+                .iter_mut()
+                .find(|widget| widget.id == id)
+                .ok_or_else(|| invalid(format!("Unknown HUD widget {id}")))?;
+            edit(widget);
+            Ok(CallToolResult::structured(json!({"widget": widget})))
+        })
     }
 
     fn lock_edits(&self) -> std::io::Result<File> {
@@ -886,6 +1248,337 @@ mod tests {
         let logs: Vec<_> = runtime.script_log().collect();
         assert_eq!(logs.len(), 1, "{logs:?}");
         assert!(logs[0].contains("escape_complete"), "{logs:?}");
+    }
+
+    #[test]
+    fn saved_input_and_hud_reject_invalid_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let server = Futty::new(root.clone());
+        let path = "main.ron";
+        let file = root.join(path);
+        Scene::default().save_new(&file).unwrap();
+        let set = |binding: &str| {
+            server.input_set(Parameters(SetInput {
+                path: path.into(),
+                bindings: [("Jump".into(), binding.into())].into(),
+                sensitivity: Some(1.5),
+            }))
+        };
+        set("J").unwrap();
+        let input = server
+            .input_get(Parameters(SceneFile { path: path.into() }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(input["input"]["bindings"]["Jump"], "J");
+        assert_eq!(input["defaults"]["Jump"], "Space");
+        let before = fs::read(&file).unwrap();
+        assert!(set("Escape").is_err());
+        assert_eq!(fs::read(&file).unwrap(), before);
+        let create = |kind, settings| {
+            let input =
+                serde_json::from_value(json!({"path":path,"kind":kind,"settings":settings}))
+                    .unwrap();
+            server
+                .hud_create(Parameters(input))
+                .unwrap()
+                .structured_content
+                .unwrap()
+        };
+        let gauge = create("Gauge", json!({"label":"Health","anchor":"BottomLeft"}));
+        let button = create("Button", json!({"label":"Retry","binding":"retry"}));
+        let widget_id = serde_json::from_value(gauge["widget"]["id"].clone()).unwrap();
+        let bind = |binding: &str| {
+            server.hud_bind(Parameters(BindHud {
+                path: path.into(),
+                widget_id,
+                binding: binding.into(),
+            }))
+        };
+        bind("player.health").unwrap();
+        assert!(bind("invalid binding").is_err());
+        let update = serde_json::from_value(json!({
+            "path":path,
+            "widget_id":widget_id,
+            "settings":{"size":[120,20]}
+        }))
+        .unwrap();
+        server.hud_update(Parameters(update)).unwrap();
+        let list = server
+            .hud_list(Parameters(SceneFile { path: path.into() }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(list["widgets"][0]["binding"], "player.health");
+        assert_eq!(list["widgets"][0]["size"], json!([120.0, 20.0]));
+        assert_eq!(list["widgets"][1], button["widget"]);
+    }
+
+    #[test]
+    fn script_tools_report_positions_and_keep_bindings_on_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let server = Futty::new(root.clone());
+        let path = "main.ron";
+        let scene = Scene::default();
+        let object_id = scene.entities[0].uuid;
+        scene.save_new(&root.join(path)).unwrap();
+        let broken = "fn on_start(entity) {\n let x = ;\n}";
+        fs::write(root.join("broken.rhai"), broken).unwrap();
+        let diagnosis = server
+            .script_validate(Parameters(ValidateScript {
+                source: None,
+                path: Some("broken.rhai".into()),
+            }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(diagnosis["valid"], false);
+        assert_eq!(diagnosis["path"], "broken.rhai");
+        assert_eq!(diagnosis["issues"][0]["line"], 2);
+        assert!(diagnosis["issues"][0]["column"].is_u64());
+
+        let initial = "fn fields() { #{speed: 4.0} }";
+        let created = server
+            .script_create(Parameters(CreateScript {
+                path: path.into(),
+                name: "Movement".into(),
+                source: initial.into(),
+            }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(created["fields"]["speed"]["Number"], 4.0);
+        let script_id = serde_json::from_value::<Uuid>(created["script_id"].clone()).unwrap();
+        let attach = |id| {
+            server.script_attach(Parameters(AttachScript {
+                path: path.into(),
+                object_id,
+                script_id: id,
+            }))
+        };
+        attach(Some(script_id)).unwrap();
+        let update = |source: &str| {
+            server.script_update(Parameters(UpdateScript {
+                path: path.into(),
+                script_id,
+                source: source.into(),
+            }))
+        };
+        let before = fs::read(root.join(path)).unwrap();
+        let error = update(broken).unwrap_err();
+        assert_eq!(error.data.unwrap()["issue"]["line"], 2);
+        assert_eq!(fs::read(root.join(path)).unwrap(), before);
+        let replacement = "fn fields() { #{speed: 8.0} }";
+        update(replacement).unwrap();
+        let stored = server
+            .script_get(Parameters(ScriptQuery {
+                path: path.into(),
+                script_id,
+            }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(stored["source"], replacement);
+        assert_eq!(stored["embedded"], true);
+        let load = || Scene::load(&root.join(path)).unwrap();
+        assert_eq!(load().entities[0].script, Some(script_id));
+        let detach = attach(None).unwrap().structured_content.unwrap();
+        assert_eq!(load().entities[0].script, None);
+        server
+            .scene_undo(Parameters(
+                serde_json::from_value::<Undo>(
+                    json!({"path":path,"undo_token":detach["undo_token"]}),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(load().entities[0].script, Some(script_id));
+    }
+
+    #[test]
+    fn asset_reimport_preserves_material_and_object_references() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let server = Futty::new(root.clone());
+        let path = "main.ron";
+        let scene_path = root.join(path);
+        let scene = Scene::default();
+        let object_id = scene.entities[0].uuid;
+        scene.save_new(&scene_path).unwrap();
+        let original = include_bytes!("../../../examples/sprite-playground/Signal.png");
+        let replacement = include_bytes!("../../../examples/asset-preview/Workshop Grid.png");
+        fs::write(root.join("source.png"), original).unwrap();
+        fs::write(root.join("replacement.png"), replacement).unwrap();
+        fs::write(root.join("broken.png"), b"not a texture").unwrap();
+        fs::write(
+            root.join("clip.wav"),
+            include_bytes!("../../../examples/audio-playground/Chime.wav"),
+        )
+        .unwrap();
+        fs::write(
+            root.join("model.glb"),
+            include_bytes!("../../../examples/asset-preview/Workshop Crate.glb"),
+        )
+        .unwrap();
+        let imported = |source: &str| {
+            server.asset_import(Parameters(ImportAsset {
+                path: path.into(),
+                source: source.into(),
+            }))
+        };
+        assert!(imported("broken.png").is_err());
+        assert!(imported("../source.png").is_err());
+        let asset_id = |source| {
+            serde_json::from_value::<Uuid>(
+                imported(source).unwrap().structured_content.unwrap()["asset"]["id"].clone(),
+            )
+            .unwrap()
+        };
+        let texture = asset_id("source.png");
+        let clip = asset_id("clip.wav");
+        let model = asset_id("model.glb");
+        let material = server
+            .material_create(Parameters(
+                serde_json::from_value::<CreateMaterial>(
+                    json!({"path":path,"settings":{"name":"Grid","texture":texture}}),
+                )
+                .unwrap(),
+            ))
+            .unwrap()
+            .structured_content
+            .unwrap()["material_id"]
+            .clone();
+        server
+            .scene_apply(Parameters(
+                serde_json::from_value::<Batch>(json!({
+                    "path":path,
+                    "edits":[
+                        {"op":"attach_asset","object":object_id,"asset_id":model},
+                        {"op":"attach_asset","object":object_id,"asset_id":clip},
+                        {"op":"set_material","object":object_id,"material_id":material}
+                    ]
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let before = fs::read(&scene_path).unwrap();
+        let reimport = |source: &str| {
+            server.asset_reimport(Parameters(ReimportAsset {
+                path: path.into(),
+                source: source.into(),
+                asset_id: texture,
+            }))
+        };
+        let saved = Scene::load(&scene_path).unwrap();
+        let asset = saved
+            .assets
+            .iter()
+            .find(|asset| asset.id == texture)
+            .unwrap();
+        assert!(reimport("broken.png").is_err());
+        assert!(reimport("clip.wav").is_err());
+        assert_eq!(
+            futty_assets::read_saved(&scene_path, asset).unwrap(),
+            original
+        );
+        reimport("replacement.png").unwrap();
+        assert_eq!(fs::read(&scene_path).unwrap(), before);
+        assert_eq!(
+            futty_assets::read_saved(&scene_path, asset).unwrap(),
+            replacement
+        );
+        let list = server
+            .asset_list(Parameters(SceneFile { path: path.into() }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(
+            list["materials"][material.as_str().unwrap()]["texture"],
+            texture.to_string()
+        );
+        assert_eq!(saved.entities[0].mesh, Some(model));
+        assert_eq!(saved.entities[0].audio_source.unwrap().clip, clip);
+        let updated = server
+            .material_update(Parameters(
+                serde_json::from_value::<UpdateMaterial>(json!({
+                    "path":path,"material_id":material,"settings":{"texture":null,"roughness":0.25}
+                }))
+                .unwrap(),
+            ))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert!(updated["material"]["texture"].is_null());
+        assert_eq!(updated["material"]["name"], "Grid");
+    }
+
+    #[test]
+    fn component_edits_keep_settings_and_undo_atomically() {
+        let temp = tempfile::tempdir().unwrap();
+        let server = Futty::new(temp.path().canonicalize().unwrap());
+        let path = "main.ron";
+        Scene::default().save_new(&server.root.join(path)).unwrap();
+        let apply = |edits| {
+            server.scene_apply(Parameters(
+                serde_json::from_value::<Batch>(json!({"path":path,"edits":edits})).unwrap(),
+            ))
+        };
+        let created = apply(json!([
+            {"op":"add_object","key":"lamp","name":"Lamp"},
+            {"op":"add_object","key":"floor","name":"Floor"},
+            {"op":"add_object","key":"player","name":"Player"},
+            {"op":"set_component","object":"lamp","component":{"kind":"light","light_type":"Directional","intensity":2.0}},
+            {"op":"set_component","object":"floor","component":{"kind":"body","size":[3,1,4],"collision_layer":4}},
+            {"op":"set_component","object":"player","component":{"kind":"character","speed":6.0}}
+        ])).unwrap().structured_content.unwrap();
+        let lamp = &created["objects"]["lamp"];
+        let floor = &created["objects"]["floor"];
+        let player = &created["objects"]["player"];
+        let read = |id, kind| {
+            server
+                .component_get(Parameters(
+                    serde_json::from_value::<ComponentQuery>(
+                        json!({"path":path,"object_id":id,"component":kind}),
+                    )
+                    .unwrap(),
+                ))
+                .unwrap()
+                .structured_content
+                .unwrap()["value"]
+                .clone()
+        };
+        assert_eq!(read(floor, "body")["layers"]["layer"], 4);
+        assert_eq!(read(player, "character")["speed"], 6.0);
+        let result = apply(json!([
+            {"op":"set_component","object":floor,"component":{"kind":"body","friction":0.5}},
+            {"op":"remove_component","object":lamp,"component":"light"}
+        ]))
+        .unwrap()
+        .structured_content
+        .unwrap();
+        assert!(read(lamp, "light").is_null());
+        assert_eq!(read(floor, "body")["size"], json!([3.0, 1.0, 4.0]));
+        assert_eq!(read(floor, "body")["friction"], 0.5);
+        let saved = fs::read(server.root.join(path)).unwrap();
+        assert!(
+            apply(json!([
+                {"op":"remove_component","object":floor,"component":"body"},
+                {"op":"set_component","object":player,"component":{"kind":"body"}}
+            ]))
+            .is_err()
+        );
+        assert_eq!(fs::read(server.root.join(path)).unwrap(), saved);
+        server
+            .scene_undo(Parameters(
+                serde_json::from_value::<Undo>(
+                    json!({"path":path,"undo_token":result["undo_token"]}),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(read(lamp, "light")["intensity"], 2.0);
     }
 
     #[test]

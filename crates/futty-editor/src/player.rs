@@ -551,7 +551,7 @@ impl eframe::App for Player {
                         &ctx,
                         game,
                         is_range,
-                        &self.input_settings,
+                        &self.input_settings.with_profile(&self.world.scene.input),
                         hud_blocks_mouse,
                     );
                     self.world.runtime.game_input(keys);
@@ -562,11 +562,12 @@ impl eframe::App for Player {
                     self.world.audio.update();
                     audio::pump(&mut self.world.audio, &mut self.world.runtime);
                 }
+                let settings = self.input_settings.with_profile(&self.world.scene.input);
                 self.world.paint(
                     ui,
                     &response,
                     &mut self.range_controls,
-                    &self.input_settings,
+                    &settings,
                     !self.controls_open,
                 );
                 if let Some(error) = &self.scene_error {
@@ -579,7 +580,8 @@ impl eframe::App for Player {
                     );
                 }
             });
-        self.input_settings.window(&ctx, &mut self.controls_open);
+        self.input_settings
+            .window(&ctx, &mut self.controls_open, &self.world.scene.input);
         ctx.request_repaint();
     }
 

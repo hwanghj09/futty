@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fmt::Display, path::PathBuf};
 
-use futty_core::{Asset, AssetKind, Light, LightKind, Primitive};
+use futty_core::{AssetKind, Light, LightKind, Primitive};
 use futty_runtime::{
     Body, CharacterController, HudAnchor, HudKind, HudWidget, Motion, Object, Scene,
 };
@@ -10,7 +10,10 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::camera_object;
+use crate::{
+    camera_object,
+    components::{ComponentKind, ComponentPatch},
+};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -52,6 +55,7 @@ impl ObjectQuery {
                     "texture": object.texture,
                     "material": object.material,
                     "script": object.script,
+                    "audio_source": object.audio_source,
                     "body": object.body,
                     "camera": object.camera,
                     "light": object.light,
@@ -120,6 +124,14 @@ enum Operation {
         object: String,
         properties: Properties,
     },
+    SetComponent {
+        object: String,
+        component: ComponentPatch,
+    },
+    RemoveComponent {
+        object: String,
+        component: ComponentKind,
+    },
     SetParent {
         object: String,
         /// Existing UUID or batch key. Omit or use null to move to scene root. Local transform is kept.
@@ -139,10 +151,21 @@ enum Operation {
         #[schemars(with = "String")]
         asset_id: Uuid,
     },
+    SetMaterial {
+        object: String,
+        /// Omit or use null to clear the shared material assignment.
+        #[schemars(with = "Option<String>")]
+        material_id: Option<Uuid>,
+    },
     SetScript {
         object: String,
         name: String,
         source: String,
+    },
+    AttachScript {
+        object: String,
+        #[schemars(with = "Option<String>")]
+        script_id: Option<Uuid>,
     },
     AddHudText {
         label: String,
@@ -224,6 +247,16 @@ impl Properties {
 }
 
 impl Batch {
+    pub fn attach_script(input: crate::scripts::AttachScript) -> Self {
+        Self {
+            path: input.path,
+            edits: vec![Operation::AttachScript {
+                object: input.object_id.to_string(),
+                script_id: input.script_id,
+            }],
+        }
+    }
+
     pub fn apply(self, scene: &mut Scene) -> Result<BTreeMap<String, Uuid>, ErrorData> {
         if !(1..=64).contains(&self.edits.len()) {
             return Err(invalid("Provide between 1 and 64 scene edits"));
@@ -293,6 +326,14 @@ fn apply_edit(
             let index = object_index(&object, scene, keys)?;
             properties.apply(&mut scene.entities[index])?;
         }
+        Operation::SetComponent { object, component } => {
+            let index = object_index(&object, scene, keys)?;
+            component.apply(&mut scene.entities[index])?;
+        }
+        Operation::RemoveComponent { object, component } => {
+            let index = object_index(&object, scene, keys)?;
+            component.remove(&mut scene.entities[index])?;
+        }
         Operation::SetParent { object, parent } => {
             let index = object_index(&object, scene, keys)?;
             let parent = parent
@@ -354,10 +395,14 @@ fn apply_edit(
                     }
                 }
                 AssetKind::Script => {
-                    if object.script != Some(asset_id) {
-                        object.script = Some(asset_id);
-                        object.script_fields.clear();
-                    }
+                    crate::scripts::assign(object, Some(asset_id));
+                }
+                AssetKind::Wav | AssetKind::Ogg if object.prefab.is_none() => {
+                    let mut source = object
+                        .audio_source
+                        .unwrap_or_else(|| futty_runtime::AudioSource::new(asset_id));
+                    source.clip = asset_id;
+                    object.audio_source = Some(source);
                 }
                 _ => {
                     return Err(invalid(
@@ -366,6 +411,22 @@ fn apply_edit(
                 }
             }
         }
+        Operation::SetMaterial {
+            object,
+            material_id,
+        } => {
+            let index = object_index(&object, scene, keys)?;
+            if let Some(id) = material_id
+                && !scene.materials.contains_key(&id)
+            {
+                return Err(invalid(format!("Unknown material {id}")));
+            }
+            let object = &mut scene.entities[index];
+            if material_id.is_some() && (!object.has_renderer() || object.sprite.is_some()) {
+                return Err(invalid("Shared materials require a 3D renderable object"));
+            }
+            object.material = material_id;
+        }
         Operation::SetScript {
             object,
             name,
@@ -373,15 +434,21 @@ fn apply_edit(
         } => {
             let index = object_index(&object, scene, keys)?;
             futty_runtime::inspect_script(&source).map_err(invalid)?;
-            let id = Uuid::new_v4();
-            scene.assets.push(Asset {
-                id,
-                name,
-                kind: AssetKind::Script,
-            });
-            scene.script_sources.insert(id, source);
-            scene.entities[index].script = Some(id);
-            scene.entities[index].script_fields.clear();
+            let id = crate::scripts::register(scene, name, source);
+            crate::scripts::assign(&mut scene.entities[index], Some(id));
+        }
+        Operation::AttachScript { object, script_id } => {
+            let index = object_index(&object, scene, keys)?;
+            if let Some(id) = script_id {
+                crate::scripts::get_asset(scene, id)?;
+            }
+            let object = &mut scene.entities[index];
+            if object.prefab.is_some() {
+                return Err(invalid(
+                    "Edit the prefab source object to change its script",
+                ));
+            }
+            crate::scripts::assign(object, script_id);
         }
         Operation::AddHudText {
             label,

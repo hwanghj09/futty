@@ -84,6 +84,12 @@ impl Scene {
             .chain(self.prefabs.values().flat_map(|prefab| &prefab.entities))
     }
 
+    pub fn model_animation_references(&self, id: Uuid) -> impl Iterator<Item = (&str, u32)> {
+        self.referenced_objects()
+            .filter(move |object| object.mesh == Some(id))
+            .filter_map(|object| Some((object.name.as_str(), object.animation?.clip)))
+    }
+
     fn capture_prefab(
         &self,
         root: Uuid,

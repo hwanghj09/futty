@@ -121,6 +121,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1
 | `set_parent`, `remove_leaf` | 로컬 Transform을 유지하며 부모를 바꾸거나, 자식과 프리팹 링크가 없는 오브젝트를 삭제합니다. |
 | `place_prefab`, `attach_asset` | 등록된 프리팹을 배치하거나 모델·텍스처·스크립트 UUID를 연결합니다. |
 | `set_script`, `add_hud_text` | Rhai 소스를 검사해 연결하거나 텍스트 HUD와 값 바인딩을 추가합니다. |
+| `set_component`, `remove_component` | 조명(`light`), 충돌체·강체(`body`), 캐릭터 컨트롤러(`character`)를 설정하거나 제거합니다. |
+
+컴포넌트 하나를 조회하려면 `component_get`에 씬 `path`, 오브젝트 `object_id`, `component` 종류를 넘깁니다. 없는 컴포넌트는 `value: null`로 표시됩니다.
+
+`scene_apply`에서 아래 편집은 `floor` 키로 등록된 오브젝트의 충돌체를 설정합니다. 기존 오브젝트는 키 자리에 UUID를 씁니다. 빠진 값은 기존 값을 유지하고, 새 컴포넌트라면 기본값을 사용합니다.
+
+```json
+{"op":"set_component","object":"floor","component":{"kind":"body","motion":"Fixed","size":[8,1,8],"sensor":false,"collision_layer":2}}
+```
+
+제거는 `{"op":"remove_component","object":"floor","component":"body"}`로 요청합니다. `light_type`은 `Point` 또는 `Directional`, `motion`은 `Fixed`, `Dynamic`, `Kinematic`을 사용합니다. 강체와 캐릭터 컨트롤러는 같은 루트 오브젝트에 동시에 둘 수 없습니다. 연결된 프리팹 인스턴스의 컴포넌트는 원본 오브젝트에서 바꿉니다.
 
 바닥을 만들고 태그를 지정하는 `scene_apply` 입력 예시입니다.
 
@@ -137,6 +148,57 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1
 ```
 
 [Beacon Bot Escape](../examples/agent-escape/Beacon%20Bot%20Escape.futty.scene.ron)에서 조작할 수 있는 카메라, 고정 충돌체, Rhai 스위치와 문, 목표 HUD를 확인할 수 있습니다. **Play**를 누르고 **W**로 전진해 주황색 스위치 옆에서 **E**를 누른 뒤, 열린 문을 지나면 됩니다.
+
+## MCP 에셋과 재질
+
+| 도구 | 사용 방법 |
+| --- | --- |
+| `asset_import` | 저장된 씬의 `path`와 작업 폴더 안의 파일 `source`를 넘깁니다. GLB, PNG, WAV, Ogg를 검사한 뒤 씬 옆의 `Assets/Futty/`에 복사하고 등록된 UUID를 반환합니다. |
+| `asset_list` | `path`의 등록된 에셋과 공유 재질을 조회합니다. |
+| `asset_reimport` | `path`, `asset_id`, 같은 종류의 새 `source`를 지정합니다. 재질 및 오브젝트 참조에 쓰이는 UUID는 그대로 유지됩니다. GLB는 지정한 씬과 그 프리팹에서 참조하는 애니메이션 클립을 확인합니다. |
+| `material_create` / `material_update` | `path`와 `settings`를 넘기고 갱신 시에는 `material_id`도 지정합니다. 설정은 `name`, `color`, `texture`, `roughness`, `emission`, `emission_strength`입니다. 생략한 필드는 유지되며 `texture: null`은 텍스처 연결을 해제합니다. |
+
+`scene_apply`의 `attach_asset`으로 모델, 텍스처, 오디오를 오브젝트에 붙입니다. 공유 재질은 `{"op":"set_material","object":"floor","material_id":"<uuid>"}`로 할당합니다. `object`에는 기존 오브젝트 UUID 또는 현재 배치의 키를 쓸 수 있으며, `material_id: null`로 할당을 해제합니다.
+
+별도 도구로 등록하거나 교체한 에셋 파일과 재질 설정은 `scene_undo`의 범위 밖입니다. `scene_apply`에서 한 할당은 배치와 함께 되돌릴 수 있습니다.
+
+## MCP에서 Rhai 스크립트 작업하기
+
+| 도구 | 입력과 결과 |
+| --- | --- |
+| `script_validate` | Rhai 코드인 `source` 또는 작업 폴더 기준 `.rhai` 파일 `path`를 지정합니다. `valid`, 유효한 `fields()`의 기본값 또는 오류 메시지·줄·열이 반환됩니다. |
+| `script_create` | 씬 `path`, `name`, `source`를 넘기면 검사를 통과한 소스를 씬에 등록하고 `script_id`를 반환합니다. |
+| `script_get` | 씬 `path`와 `script_id`로 등록된 스크립트의 이름과 원문을 읽습니다. |
+| `script_update` | 씬 `path`, `script_id`, 새 `source`를 지정합니다. UUID와 오브젝트 연결이 유지됩니다. |
+| `script_attach` | 씬 `path`, `object_id`, `script_id`를 넘깁니다. `script_id: null`로 연결을 해제하며, 변경은 `scene_undo`로 되돌릴 수 있습니다. |
+
+여러 오브젝트에 붙이려면 `scene_apply`에서 `{"op":"attach_script","object":"switch","script_id":"<uuid>"}`를 사용합니다. `object`에는 UUID나 배치 내 오브젝트 키가 들어갑니다. 연결된 프리팹 인스턴스의 스크립트를 바꾸려면 원본을 편집합니다.
+
+생성·수정은 검사를 통과한 소스만 씬 안에 저장합니다. 파일로 가져온 스크립트를 수정해도 원래 `.rhai` 파일은 보존되고, 그 씬은 새 내장 소스를 사용합니다. 줄과 열은 Rhai가 위치를 제공하는 오류에서 표시됩니다. 실행 결과는 별도로 `play_test`에서 확인할 수 있습니다.
+
+## MCP에서 게임 입력과 HUD 설정하기
+
+- `input_get`에 씬 `path`를 넘겨 저장된 입력 설정과 기본 바인딩을 확인합니다.
+- `input_set`은 해당 씬의 입력 설정 전체를 교체합니다. 지정한 항목은 에디터 Play와 단독 게임에 적용되고, 나머지는 플레이어의 **F10 → Game Controls** 설정을 사용합니다. 프로젝트에서 씬을 전환하면 새 씬의 입력 설정이 적용됩니다.
+
+```json
+{
+  "path": "Main.futty.scene.ron",
+  "bindings": {"MoveForward":"ArrowUp","Jump":"J","Interact":"F"},
+  "sensitivity": 1.3
+}
+```
+
+키는 대문자 A–Z, 숫자 0–9, 방향키(`ArrowUp` 등), `Space`, `Enter`, `Tab`, `Backspace`, `Mouse1`–`Mouse5`를 지원합니다. 헤드리스 `play_step`과 `play_test`는 기존처럼 물리 키 대신 행동을 받습니다.
+
+| 도구 | 용도 |
+| --- | --- |
+| `hud_list` | 씬 `path`의 위젯을 그리는 순서대로 조회 |
+| `hud_create` | `path`, `kind`(`Text`, `Image`, `Button`, `Gauge`), `settings`로 생성 |
+| `hud_update` | `path`, `widget_id`, `settings`로 필요한 속성만 수정 |
+| `hud_bind` | `path`, `widget_id`, `binding`으로 값이나 버튼 동작 연결 |
+
+설정에는 `label`, `binding`, `anchor`(`TopLeft`, `TopRight`, `BottomLeft`, `BottomRight`, `Center`), `offset`, `size`, `color`, `text_size`, `image`를 쓸 수 있습니다. Image의 `image`에는 등록된 PNG UUID를 지정합니다. Text와 Gauge는 Rhai의 `set_hud("score", 값)`과 같은 키에 연결하고, Button은 `hud_pressed("retry")`와 같은 이름에 연결합니다.
 
 ## 씬 검증과 프로젝트 관리
 

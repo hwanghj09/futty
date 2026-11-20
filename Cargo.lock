@@ -1608,6 +1608,7 @@ name = "futty-mcp"
 version = "0.1.0"
 dependencies = [
  "futty-assets",
+ "futty-audio",
  "futty-core",
  "futty-runtime",
  "glam 0.33.12",

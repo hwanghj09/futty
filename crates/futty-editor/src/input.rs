@@ -1,5 +1,5 @@
 use eframe::egui::{self, Event, Key, PointerButton};
-use futty_runtime::{ActionState, GameInput, InputAction};
+use futty_runtime::{ActionState, GameInput, InputAction, InputProfile};
 use serde::{Deserialize, Serialize};
 
 const STORAGE_KEY: &str = "futty.game-input.v1";
@@ -11,6 +11,17 @@ enum Binding {
 }
 
 impl Binding {
+    fn from_name(name: &str) -> Option<Self> {
+        Some(Self::Mouse(match name {
+            "Mouse1" => PointerButton::Primary,
+            "Mouse2" => PointerButton::Secondary,
+            "Mouse3" => PointerButton::Middle,
+            "Mouse4" => PointerButton::Extra1,
+            "Mouse5" => PointerButton::Extra2,
+            _ => return Key::from_name(name).map(Self::Key),
+        }))
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Key(key) => key.name(),
@@ -41,7 +52,7 @@ impl Binding {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub(crate) struct InputSettings {
     bindings: [Binding; InputAction::ALL.len()],
     sensitivity: f32,
@@ -51,17 +62,7 @@ impl Default for InputSettings {
     fn default() -> Self {
         Self {
             bindings: InputAction::ALL.map(|action| {
-                Binding::Key(match action {
-                    InputAction::MoveForward => Key::W,
-                    InputAction::MoveBackward => Key::S,
-                    InputAction::MoveLeft => Key::A,
-                    InputAction::MoveRight => Key::D,
-                    InputAction::Jump => Key::Space,
-                    InputAction::Fire => return Binding::Mouse(PointerButton::Primary),
-                    InputAction::Reload => Key::R,
-                    InputAction::Interact => Key::E,
-                    InputAction::Retry => Key::Enter,
-                })
+                Binding::from_name(action.default_binding()).expect("default input binding")
             }),
             sensitivity: 1.0,
         }
@@ -69,6 +70,21 @@ impl Default for InputSettings {
 }
 
 impl InputSettings {
+    pub(crate) fn with_profile(&self, profile: &InputProfile) -> Self {
+        let mut settings = *self;
+        for action in InputAction::ALL {
+            if let Some(binding) = profile
+                .bindings
+                .get(action.name())
+                .and_then(|value| Binding::from_name(value))
+            {
+                settings.bindings[action as usize] = binding;
+            }
+        }
+        settings.sensitivity = profile.sensitivity.unwrap_or(settings.sensitivity);
+        settings
+    }
+
     pub(crate) fn load(storage: Option<&dyn eframe::Storage>) -> Self {
         storage
             .and_then(|storage| eframe::get_value::<Self>(storage, STORAGE_KEY))
@@ -126,7 +142,7 @@ impl InputSettings {
         }
     }
 
-    pub(crate) fn window(&mut self, ctx: &egui::Context, open: &mut bool) {
+    pub(crate) fn window(&mut self, ctx: &egui::Context, open: &mut bool, profile: &InputProfile) {
         egui::Window::new("Game Controls")
             .open(open)
             .collapsible(false)
@@ -136,8 +152,13 @@ impl InputSettings {
                     .num_columns(2)
                     .show(ui, |ui| {
                         for action in InputAction::ALL {
-                            let binding = &mut self.bindings[action as usize];
                             ui.label(action.name());
+                            if let Some(binding) = profile.bindings.get(action.name()) {
+                                ui.label(binding).on_hover_text("Set by this scene");
+                                ui.end_row();
+                                continue;
+                            }
+                            let binding = &mut self.bindings[action as usize];
                             egui::ComboBox::from_id_salt(action.name())
                                 .selected_text(binding.label())
                                 .width(125.0)
@@ -167,12 +188,17 @@ impl InputSettings {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Mouse sensitivity");
-                    ui.add(
-                        egui::DragValue::new(&mut self.sensitivity)
-                            .range(0.1..=4.0)
-                            .speed(0.02)
-                            .suffix("×"),
-                    );
+                    if let Some(sensitivity) = profile.sensitivity {
+                        ui.label(format!("{sensitivity}×"))
+                            .on_hover_text("Set by this scene");
+                    } else {
+                        ui.add(
+                            egui::DragValue::new(&mut self.sensitivity)
+                                .range(0.1..=4.0)
+                                .speed(0.02)
+                                .suffix("×"),
+                        );
+                    }
                 });
                 if ui.button("Reset to Defaults").clicked() {
                     *self = Self::default();
@@ -184,6 +210,41 @@ impl InputSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scene_profile_maps_key_and_keeps_unspecified_player_settings() {
+        let mut personal = InputSettings::default();
+        personal.bindings[InputAction::Jump as usize] = Binding::Key(Key::J);
+        let profile = InputProfile {
+            bindings: [("MoveForward".into(), "ArrowUp".into())].into(),
+            sensitivity: Some(2.0),
+        };
+        profile.validate().unwrap();
+        let effective = personal.with_profile(&profile);
+        assert_eq!(effective.sensitivity, 2.0);
+        assert_eq!(effective.label(InputAction::Jump), "J");
+        assert_eq!(personal.label(InputAction::MoveForward), "W");
+        let ctx = egui::Context::default();
+        ctx.run_ui(
+            egui::RawInput {
+                events: vec![Event::Key {
+                    key: Key::ArrowUp,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                let input = ui.input(|raw| effective.sample(raw, false));
+                assert!(input.forward);
+                assert!(input.action(InputAction::MoveForward).pressed);
+            },
+        )
+        .textures_delta
+        .clear();
+    }
 
     #[test]
     fn saved_bindings_preserve_held_keys_and_a_click_between_frames() {

@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 futty-assets.workspace = true
+futty-audio.workspace = true
 futty-core.workspace = true
 futty-runtime.workspace = true
 glam.workspace = true

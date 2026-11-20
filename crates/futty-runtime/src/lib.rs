@@ -18,6 +18,7 @@ use uuid::Uuid;
 mod audio;
 mod character;
 mod hud;
+mod input;
 mod prefab;
 pub mod project;
 mod range;
@@ -26,6 +27,7 @@ mod sprite;
 pub use audio::{AudioCue, AudioListener, AudioSource, AudioStart};
 pub use character::CharacterController;
 pub use hud::{HudAnchor, HudKind, HudWidget, MAX_HUD_WIDGETS, range_hud_value};
+pub use input::InputProfile;
 pub use prefab::{Prefab, PrefabLink};
 pub use range::{MAGAZINE, ROUND_SECONDS, RangeConfig, RangeInput, RangeStatus};
 
@@ -34,8 +36,8 @@ pub use physics::{
 };
 use physics::{MAX_STEPS, Physics, STEP};
 pub use script::{
-    ActionState, GameInput, InputAction, MAX_SCRIPT_BYTES, ScriptFields, ScriptValue,
-    inspect_script,
+    ActionState, GameInput, InputAction, MAX_SCRIPT_BYTES, ScriptDiagnostic, ScriptFields,
+    ScriptValue, inspect_script, inspect_script_diagnostic,
 };
 use script::{Callback, MAX_WORLD_COMMANDS, Scripts, WorldCommand};
 pub use sprite::{Billboard, Sprite};
@@ -202,6 +204,8 @@ pub struct Scene {
     pub training_range: Option<RangeConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hud: Vec<HudWidget>,
+    #[serde(default, skip_serializing_if = "InputProfile::is_empty")]
+    pub input: InputProfile,
 }
 
 impl Default for Scene {
@@ -219,6 +223,7 @@ impl Default for Scene {
             sky: true,
             training_range: None,
             hud: Vec::new(),
+            input: InputProfile::default(),
         }
     }
 }
@@ -283,6 +288,9 @@ impl Scene {
         if self.scene_uuid.is_nil() {
             return Err("Missing scene UUID".into());
         }
+        self.input
+            .validate()
+            .map_err(|message| scene_issue("input", None, message))?;
         if self.main_camera.is_some_and(|id| {
             !self
                 .entities

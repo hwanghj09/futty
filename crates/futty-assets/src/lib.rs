@@ -103,6 +103,12 @@ pub fn save(scene: &Path, asset: &Asset, bytes: &[u8]) -> AssetResult<()> {
     write_asset(&path, bytes, false)
 }
 
+pub fn save_new(scene: &Path, asset: &Asset, bytes: &[u8]) -> AssetResult<PathBuf> {
+    let path = directory(scene, true)?.join(filename(asset));
+    write_asset(&path, bytes, false)?;
+    Ok(path)
+}
+
 pub fn replace_saved_model(
     scene: &Path,
     asset: &Asset,
@@ -112,6 +118,28 @@ pub fn replace_saved_model(
     if asset.kind != AssetKind::Model {
         return Err("Reimport requires a GLB model asset".into());
     }
+    replace_asset(scene, asset, bytes, |current| {
+        current.is_none_or(|current| {
+            expected.map_or_else(|| model(current).is_err(), |expected| current == expected)
+        })
+    })
+}
+
+pub fn replace_saved(
+    scene: &Path,
+    asset: &Asset,
+    expected: Option<&[u8]>,
+    bytes: &[u8],
+) -> AssetResult<()> {
+    replace_asset(scene, asset, bytes, |current| expected == current)
+}
+
+fn replace_asset(
+    scene: &Path,
+    asset: &Asset,
+    bytes: &[u8],
+    may_replace: impl FnOnce(Option<&[u8]>) -> bool,
+) -> AssetResult<()> {
     let dir = directory(scene, true)?;
     let path = dir.join(filename(asset));
     let lock = OpenOptions::new()
@@ -127,9 +155,7 @@ pub fn replace_saved_model(
             if current == bytes {
                 return Ok(());
             }
-            let matches_loaded =
-                expected.map_or_else(|| model(&current).is_err(), |expected| current == expected);
-            if !matches_loaded {
+            if !may_replace(Some(&current)) {
                 return Err(format!(
                     "{} changed on disk. Reopen the scene before reimporting.",
                     asset.name
@@ -138,7 +164,7 @@ pub fn replace_saved_model(
             }
             write_asset(&path, bytes, true)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && may_replace(None) => {
             write_asset(&path, bytes, false)
         }
         Err(error) => Err(error.into()),
@@ -190,6 +216,23 @@ pub fn script_source(bytes: &[u8]) -> AssetResult<&str> {
         return Err("Script exceeds the 64 KiB source limit".into());
     }
     Ok(std::str::from_utf8(bytes)?.trim_start_matches('\u{feff}'))
+}
+
+pub fn model_with_clips<'a>(
+    bytes: &[u8],
+    mut referenced_clips: impl Iterator<Item = (&'a str, u32)>,
+) -> AssetResult<Model> {
+    let model = model(bytes)?;
+    let clips = model.rig.as_ref().map_or(&[][..], Rig::clips);
+    if let Some((name, clip)) =
+        referenced_clips.find(|(_, index)| !clips.iter().any(|clip| clip.index == *index))
+    {
+        return Err(format!(
+            "{name} uses animation clip {clip}, which is missing from the replacement GLB"
+        )
+        .into());
+    }
+    Ok(model)
 }
 
 pub fn model(bytes: &[u8]) -> AssetResult<Model> {

@@ -414,24 +414,7 @@ fn replacement_model(
     id: Uuid,
     bytes: &[u8],
 ) -> futty_assets::AssetResult<futty_assets::Model> {
-    let model = futty_assets::model(bytes)?;
-    let clips = model.rig.as_ref().map_or(&[][..], futty_assets::Rig::clips);
-    if let Some((name, clip)) = scene
-        .referenced_objects()
-        .filter_map(|object| {
-            (object.mesh == Some(id))
-                .then_some(object.animation)
-                .flatten()
-                .map(|animation| (object.name.as_str(), animation.clip))
-        })
-        .find(|(_, index)| !clips.iter().any(|clip| clip.index == *index))
-    {
-        return Err(format!(
-            "{name} uses animation clip {clip}, which is missing from the replacement GLB"
-        )
-        .into());
-    }
-    Ok(model)
+    futty_assets::model_with_clips(bytes, scene.model_animation_references(id))
 }
 
 fn asset_primary_action(asset: &Asset) -> Action {

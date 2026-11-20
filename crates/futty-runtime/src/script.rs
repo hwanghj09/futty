@@ -272,7 +272,28 @@ impl SpawnIds {
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct ScriptDiagnostic {
+    pub message: String,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+}
+
+impl ScriptDiagnostic {
+    fn new(message: impl Into<String>, position: rhai::Position) -> Self {
+        Self {
+            message: message.into(),
+            line: position.line(),
+            column: position.position(),
+        }
+    }
+}
+
 pub fn inspect_script(source: &str) -> Result<ScriptFields, String> {
+    inspect_script_diagnostic(source).map_err(|error| error.message)
+}
+
+pub fn inspect_script_diagnostic(source: &str) -> Result<ScriptFields, ScriptDiagnostic> {
     let scripts = Scripts::new(None);
     scripts
         .build_program(source)
@@ -556,14 +577,17 @@ impl Scripts {
             .map_or_else(Uuid::new_v4, SpawnIds::next)
     }
 
-    fn build_program(&self, source: &str) -> Result<Program, String> {
+    fn build_program(&self, source: &str) -> Result<Program, ScriptDiagnostic> {
         if source.len() > MAX_SCRIPT_BYTES {
-            return Err("Script exceeds the 64 KiB source limit".into());
+            return Err(ScriptDiagnostic::new(
+                "Script exceeds the 64 KiB source limit",
+                rhai::Position::NONE,
+            ));
         }
         let ast = self
             .engine
             .compile(source)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ScriptDiagnostic::new(error.to_string(), error.position()))?;
         let functions: HashSet<_> = ast
             .iter_functions()
             .map(|function| function.name.to_owned())
@@ -579,15 +603,23 @@ impl Scripts {
                     "fields",
                     (),
                 )
-                .map_err(|error| format!("fields(): {error}"))?;
+                .map_err(|error| {
+                    ScriptDiagnostic::new(format!("fields(): {error}"), error.position())
+                })?;
             for (name, value) in entries {
                 let value = ScriptValue::from_dynamic(&value)
                     .filter(ScriptValue::valid)
                     .ok_or_else(|| {
-                        format!("fields(): {name} must be a finite number, boolean or text")
+                        ScriptDiagnostic::new(
+                            format!("fields(): {name} must be a finite number, boolean or text"),
+                            rhai::Position::NONE,
+                        )
                     })?;
                 if name.is_empty() || name.len() > 64 {
-                    return Err("fields(): names must contain 1 to 64 bytes".into());
+                    return Err(ScriptDiagnostic::new(
+                        "fields(): names must contain 1 to 64 bytes",
+                        rhai::Position::NONE,
+                    ));
                 }
                 defaults.insert(name.to_string(), value);
             }
@@ -602,7 +634,7 @@ impl Scripts {
     pub(crate) fn compile(&mut self, id: Uuid, name: &str, source: Option<&str>) {
         let compiled = source
             .ok_or_else(|| "Script source is missing".to_owned())
-            .and_then(|source| self.build_program(source));
+            .and_then(|source| self.build_program(source).map_err(|error| error.message));
         self.programs.insert(id, (name.into(), compiled));
     }
 

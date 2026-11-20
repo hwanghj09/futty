@@ -1593,11 +1593,12 @@ impl Editor {
                 let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
                 self.game_rect = Some(rect);
                 self.game_aspect = rect.aspect_ratio();
+                let settings = self.input_settings.with_profile(&world.scene.input);
                 world.paint(
                     ui,
                     &response,
                     &mut self.range_controls,
-                    &self.input_settings,
+                    &settings,
                     !modal && !self.controls_open && !self.hud_open,
                 );
             }
@@ -1748,7 +1749,7 @@ impl Editor {
                     ui,
                     &response,
                     status,
-                    &self.input_settings,
+                    &self.input_settings.with_profile(&scene.input),
                     scene.hud.is_empty(),
                     capture,
                 );
@@ -1994,17 +1995,17 @@ impl eframe::App for Editor {
             let game = self
                 .game_rect
                 .filter(|_| !self.controls_open && !self.hud_open);
-            let hud = match &self.play {
-                Some(Play::Loaded(world)) => &world.scene.hud,
-                _ => &self.doc.scene.hud,
+            let scene = match &self.play {
+                Some(Play::Loaded(world)) => &world.scene,
+                _ => &self.doc.scene,
             };
             let hud_blocks_mouse = self.range_controls.cursor_free()
-                && game.is_some_and(|rect| hud_view::over_button(&ctx, rect, hud));
+                && game.is_some_and(|rect| hud_view::over_button(&ctx, rect, &scene.hud));
             let (dt, keys) = self.range_controls.input(
                 &ctx,
                 game,
                 is_range,
-                &self.input_settings,
+                &self.input_settings.with_profile(&scene.input),
                 hud_blocks_mouse,
             );
             if let Some(play) = &mut self.play {
@@ -2100,7 +2101,12 @@ impl eframe::App for Editor {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BACKGROUND))
             .show(ui, |ui| self.dock_workspace(ui, &mut action, modal));
-        self.input_settings.window(&ctx, &mut self.controls_open);
+        let profile = match &self.play {
+            Some(Play::Loaded(world)) => &world.scene.input,
+            _ => &self.doc.scene.input,
+        };
+        self.input_settings
+            .window(&ctx, &mut self.controls_open, profile);
         self.hud_window(&ctx);
         self.doc.record_frame(
             before,

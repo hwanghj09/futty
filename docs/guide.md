@@ -274,11 +274,11 @@ fn on_update(entity, dt) {
 
 프로젝트를 열어 둔 상태에서는 **Export Windows Project…**로 등록한 모든 씬과 참조 에셋을 묶습니다. `Game.exe`는 시작 씬에서 열립니다.
 
-Windows x64에서 CLI로도 실행할 수 있습니다. 출력은 아직 없는 폴더를 지정합니다. 씬에 카메라가 없으면 CLI는 기본 카메라를 사용합니다.
+Windows x64에서 CLI로도 실행할 수 있습니다. Futty는 새 콘솔 창을 열지 않습니다. PowerShell에서 `| Out-Host`를 붙이면 내보내기가 끝날 때까지 기다리고 결과를 현재 터미널에서 확인할 수 있습니다. 출력은 아직 없는 폴더를 지정합니다. 씬에 카메라가 없으면 CLI는 기본 카메라를 사용합니다.
 
 ```powershell
-futty-editor.exe --export .\Main.futty.scene.ron .\Main-Windows
-futty-editor.exe --export ".\examples\pulse-range\Pulse Range.futty.project.ron" .\Pulse-Range-Windows
+.\futty-editor.exe --export .\Main.futty.scene.ron .\Main-Windows | Out-Host
+.\futty-editor.exe --export ".\examples\pulse-range\Pulse Range.futty.project.ron" .\Pulse-Range-Windows | Out-Host
 ```
 
 ## 검증

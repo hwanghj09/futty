@@ -57,6 +57,7 @@ ABA Games의 공개 스킬을 참고해 Futty 도구로 실행할 수 있는 지
 | [Futty 레벨 설계](../.agents/skills/futty-level-design/SKILL.md) | 목표 경로를 배치하고 우회로와 장애물 판정을 검증 |
 | [Futty 게임 피드백](../.agents/skills/futty-game-feel/SKILL.md) | 상호작용, 아이템 획득, 충돌 상태를 HUD와 시청각 효과로 전달 |
 | [Futty 밸런스 검증](../.agents/skills/futty-balance/SKILL.md) | 같은 조건에서 전략별 성공률, 소요 틱, 기록된 점수를 비교 |
+| [Futty 토큰 최적화](../.agents/skills/futty-token-optimization/SKILL.md) | RTK 출력 압축, MCP 조회 범위와 호출 수 조절, 실패 진단 보존 |
 
 | 스킬 후보 | 입력 → 산출물 | 사용할 Futty 기능 |
 | --- | --- | --- |

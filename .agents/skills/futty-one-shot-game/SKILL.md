@@ -10,8 +10,7 @@ description: Use Futty MCP plus local procedural or connected asset providers to
 Use when asked to create a full Futty game from one brief, including design, modeling, animation and sound. Futty's primary user is the AI agent; avoid mandatory manual GUI steps.
 
 Read:
-- [AI 원스톱 제작 계획](../../../docs/one-shot-asset-pipeline.md)
-- [2D/3D 멀티플레이 계획](../../../docs/2d-multiplayer-roadmap.md)
+- [Futty 통합 최종 목표 / 2D·3D·멀티플레이 / 원스톱 제작](../../../docs/FUTTY_FINAL_GOAL.md)
 - [Futty MCP 도구 안내](../../../docs/guide.md)
 - [에셋 제작 참고 스킬](../../../docs/game-skills.md)
 

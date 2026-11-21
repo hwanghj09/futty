@@ -12,4 +12,4 @@ Turn the user's premise into a playable first scene. Reuse existing Futty input 
 - Use the smallest scene that can exercise the main rule. Keep optional art, progression, and extra levels out of the first playable slice unless the user requests them.
 - When designing for an AI player, list the observations available at decision time and the existing input actions that can express each move. Include a successful sequence and a sequence that should fail.
 
-Use the [Futty roadmap](../../../docs/ai-roadmap.md) to check which AI interfaces are planned. Inspect the authored scenes and scripts under [examples](../../../examples/) before proposing replacement engine systems.
+Use the [Futty roadmap](../../../docs/FUTTY_FINAL_GOAL.md) to check which AI interfaces are planned. Inspect the authored scenes and scripts under [examples](../../../examples/) before proposing replacement engine systems.

@@ -1,5 +1,7 @@
 # Futty with Claude Code
 
+Read the [canonical Futty product vision and implementation roadmap](docs/FUTTY_FINAL_GOAL.md) before planning 2D/3D, networking, one-shot art/animation/audio generation, or changing product priorities. Keep implemented MCP tools distinct from proposed APIs.
+
 When asked to connect Futty MCP on Windows, run this from the repository root:
 
 ```powershell

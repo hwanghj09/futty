@@ -3,7 +3,7 @@
 > 기준: 2026-11-21, hwanghj09/futty main. 이 문서는 **개발 계획**이며 구현 완료 보고서가 아니다.  
 > 원칙: **AI가 MCP/CLI만으로 게임을 생성·수정·검증·빌드할 수 있어야 한다.** 사람용 에디터는 선택적 보조 도구로 유지한다.
 
-관련 문서: [AI-first 로드맵](ai-roadmap.md) · [현재 개발 체크리스트](development-checklist.md) · [MCP 가이드](guide.md)
+관련 문서: [AI 원스톱 디자인·모델링·애니메이션·사운드 제작](one-shot-asset-pipeline.md) · [AI-first 로드맵](ai-roadmap.md) · [현재 개발 체크리스트](development-checklist.md) · [MCP 가이드](guide.md)
 
 ## 0. 최종 목표와 지원 범위
 

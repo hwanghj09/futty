@@ -11,7 +11,10 @@ const COLOR: gpu::TextureFormat = gpu::TextureFormat::Rgba8Unorm;
 const DEPTH: gpu::TextureFormat = gpu::TextureFormat::Depth24Plus;
 
 mod primitive;
+mod scene;
 mod shadow;
+
+pub use scene::{SceneFrame, draw_objects};
 
 pub struct Targets {
     pub size: [u32; 2],
@@ -48,6 +51,55 @@ impl Targets {
             ),
             depth: texture("Scene depth", DEPTH, gpu::TextureUsages::empty()),
         }
+    }
+
+    pub fn read_rgba(
+        &self,
+        device: &gpu::Device,
+        queue: &gpu::Queue,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let [width, height] = self.size;
+        let stride = width * 4;
+        let aligned = stride.next_multiple_of(gpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buffer = device.create_buffer(&gpu::BufferDescriptor {
+            label: Some("Scene color readback"),
+            size: u64::from(aligned) * u64::from(height),
+            usage: gpu::BufferUsages::COPY_DST | gpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            self.color.texture().as_image_copy(),
+            gpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: gpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(aligned),
+                    rows_per_image: Some(height),
+                },
+            },
+            gpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let submission = queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer.map_async(gpu::MapMode::Read, .., move |result| {
+            let _ = tx.send(result);
+        });
+        device.poll(gpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(std::time::Duration::from_secs(20)),
+        })?;
+        rx.try_recv()??;
+        let data = buffer.get_mapped_range(..)?;
+        let mut rgba = Vec::with_capacity(stride as usize * height as usize);
+        for row in data.chunks_exact(aligned as usize) {
+            rgba.extend_from_slice(&row[..stride as usize]);
+        }
+        Ok(rgba)
     }
 }
 
@@ -1353,37 +1405,6 @@ mod tests {
     }
 
     fn pixels(device: &gpu::Device, queue: &gpu::Queue, targets: &Targets) -> Vec<u8> {
-        let [width, height] = targets.size;
-        let buffer = device.create_buffer(&gpu::BufferDescriptor {
-            label: Some("Viewport test readback"),
-            size: u64::from(width * height * 4),
-            usage: gpu::BufferUsages::COPY_DST | gpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = device.create_command_encoder(&Default::default());
-        encoder.copy_texture_to_buffer(
-            targets.color.texture().as_image_copy(),
-            gpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: gpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(width * 4),
-                    rows_per_image: Some(height),
-                },
-            },
-            gpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        queue.submit([encoder.finish()]);
-        let (tx, rx) = std::sync::mpsc::channel();
-        buffer.map_async(gpu::MapMode::Read, .., move |result| {
-            tx.send(result).unwrap()
-        });
-        device.poll(gpu::PollType::wait_indefinitely()).unwrap();
-        rx.recv().unwrap().unwrap();
-        buffer.get_mapped_range(..).unwrap().to_vec()
+        targets.read_rgba(device, queue).unwrap()
     }
 }

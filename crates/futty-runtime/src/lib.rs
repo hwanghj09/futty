@@ -1230,6 +1230,10 @@ impl Runtime {
         self.physics.events().iter()
     }
 
+    pub fn recent_physics_events(&self) -> &[PhysicsEvent] {
+        self.physics.recent()
+    }
+
     pub fn extract(&mut self) -> impl Iterator<Item = (Uuid, Transform, [f32; 3])> + '_ {
         self.objects
             .iter(&self.world)

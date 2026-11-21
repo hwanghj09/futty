@@ -138,6 +138,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1
 - [에디터와 MCP 사용 가이드](docs/guide.md)
 - [게임 제작 및 검증 스킬](docs/game-skills.md)
 - [AI-first 개발 로드맵](docs/ai-roadmap.md)
+- [현재 구현과 다음 개발 순서](docs/development-checklist.md)
 
 ## 저장소 구조
 
@@ -148,3 +149,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1
 | [`crates/futty-render`](crates/futty-render/) · [`shaders`](shaders/) | wgpu 렌더러와 WGSL 셰이더 |
 | [`crates/futty-core`](crates/futty-core/) · [`crates/futty-assets`](crates/futty-assets/) · [`crates/futty-audio`](crates/futty-audio/) | 공용 타입, 에셋 로딩, 오디오 |
 | [`crates/futty-mcp`](crates/futty-mcp/) | 로컬 stdio MCP 서버 |
+| [`crates/futty-build`](crates/futty-build/) | 에디터와 MCP가 공유하는 Windows 게임 패키징 |

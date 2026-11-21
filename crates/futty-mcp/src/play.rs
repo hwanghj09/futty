@@ -92,11 +92,14 @@ impl PlayRunner {
                     current.tick
                 )));
             }
-            current.step(Controls {
-                actions: input.actions,
-                ticks: input.ticks,
-                look: input.look,
-            })?;
+            current.step(
+                Controls {
+                    actions: input.actions,
+                    ticks: input.ticks,
+                    look: input.look,
+                },
+                |_| {},
+            )?;
             current.observe(input.session_id)
         })
     }
@@ -132,6 +135,14 @@ impl PlayRunner {
             if input.steps.len() > MAX_TICKS as usize {
                 return Err(invalid("Too many playtest steps"));
             }
+            if input.expect_hud.len() > 64
+                || input.expect_collisions.len() > 64
+                || input.expect_hud.values().any(|value| !value.is_number() && !value.is_boolean() && !value.is_string())
+                || input.expect_scene.as_deref().is_some_and(|id| !futty_runtime::valid_scene_id(id))
+                || input.expect_collisions.iter().any(|pair| pair.first.is_nil() || pair.second.is_nil() || pair.first == pair.second)
+            {
+                return Err(invalid("Invalid playtest expectations"));
+            }
             for step in &input.steps {
                 step.validate()?;
             }
@@ -141,20 +152,50 @@ impl PlayRunner {
                 input.max_ticks.unwrap_or(3600),
                 input.seed,
             )?;
+            let mut collision_ticks = vec![None; input.expect_collisions.len()];
             for step in input.steps {
                 if current.status() != Status::Running {
                     break;
                 }
-                current.step(step)?;
+                current.step(step, |state| {
+                    for (pair, tick) in input.expect_collisions.iter().zip(&mut collision_ticks) {
+                        if tick.is_none() && state.runtime.recent_physics_events().iter().any(|event| {
+                            event.started
+                                && pair.sensor.is_none_or(|sensor| sensor == event.sensor)
+                                && ((pair.first == event.first && pair.second == event.second)
+                                    || (pair.first == event.second && pair.second == event.first))
+                        }) {
+                            *tick = Some(state.tick);
+                        }
+                    }
+                })?;
             }
             let status = current.status();
             let expected = input.expect.unwrap_or(Status::Success);
             let last_observation = current.observation()?;
+            let mut checks = Vec::new();
+            for (binding, expected) in input.expect_hud {
+                let actual = &last_observation["hud"][&binding];
+                let passed = if let (Some(actual), Some(expected)) = (actual.as_f64(), expected.as_f64()) {
+                    actual == expected
+                } else {
+                    actual == &expected
+                };
+                checks.push(json!({"kind":"hud","binding":binding,"expected":expected,"actual":actual,"passed":passed}));
+            }
+            for (pair, tick) in input.expect_collisions.into_iter().zip(collision_ticks) {
+                checks.push(json!({"kind":"collision","first":pair.first,"second":pair.second,"sensor":pair.sensor,"first_tick":tick,"passed":tick.is_some()}));
+            }
+            if let Some(scene) = input.expect_scene {
+                checks.push(json!({"kind":"scene","expected":scene,"actual":current.requested_scene,"passed":current.requested_scene.as_deref() == Some(scene.as_str())}));
+            }
+            let passed = status == expected && checks.iter().all(|check| check["passed"] == true);
             if let Some(file) = output {
                 current.replay.save(&file)?;
             }
             Ok(CallToolResult::structured(json!({
-                "passed": status == expected,
+                "passed": passed,
+                "checks": checks,
                 "expected": expected,
                 "status": status,
                 "tick": current.tick,
@@ -182,7 +223,7 @@ impl PlayRunner {
                 if current.status() != Status::Running {
                     return Err(invalid("Replay contains steps after a terminal state"));
                 }
-                current.step(step)?;
+                current.step(step, |_| {})?;
                 if let Some(result) = compare_marks(&expected.marks, &current.replay.marks, offset)
                 {
                     return Ok(result);
@@ -426,7 +467,11 @@ impl Session {
         }
     }
 
-    fn step(&mut self, input: Controls) -> Result<(), ErrorData> {
+    fn step(
+        &mut self,
+        input: Controls,
+        mut after_tick: impl FnMut(&Self),
+    ) -> Result<(), ErrorData> {
         if self.status() != Status::Running {
             return Err(invalid("This play session has ended"));
         }
@@ -456,6 +501,7 @@ impl Session {
             self.tick += 1;
             self.requested_scene = self.runtime.take_scene_request();
             self.record_tick();
+            after_tick(self);
             if self.status() != Status::Running {
                 break;
             }

@@ -1,5 +1,6 @@
 mod assets;
 mod authoring;
+mod capture;
 mod components;
 mod interface;
 mod play;
@@ -61,6 +62,47 @@ struct NewScene {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct CreatePrefab {
+    path: String,
+    #[schemars(with = "String")]
+    object_id: Uuid,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct UpdatePrefab {
+    path: String,
+    #[schemars(with = "String")]
+    prefab_id: Uuid,
+    name: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PlacePrefab {
+    path: String,
+    #[schemars(with = "String")]
+    prefab_id: Uuid,
+    position: [f32; 3],
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SceneTransition {
+    /// Workspace-relative Futty project manifest.
+    path: String,
+    /// Registered source and destination scene IDs.
+    from: String,
+    to: String,
+    /// Script host in the source scene. Must have no script assigned.
+    #[schemars(with = "String")]
+    object_id: Uuid,
+    /// Existing HUD button binding. Omit to use the Interact action.
+    button: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct NewProject {
     /// New workspace-relative .futty.project.ron path. Its parent must exist.
     path: String,
@@ -75,6 +117,17 @@ struct NewProject {
 struct ProjectFile {
     /// Existing workspace-relative .futty.project.ron file.
     path: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct BuildProject {
+    /// Existing workspace-relative .futty.project.ron manifest.
+    path: String,
+    /// New workspace-relative output directory. Its parent must exist.
+    output_path: String,
+    /// Workspace-relative Windows x64 Futty executable. Defaults to dist/futty-editor.exe.
+    template_path: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -134,7 +187,126 @@ impl ServerHandler for Futty {
 #[tool_router]
 impl Futty {
     #[tool(
-        description = "Run a saved scene headlessly from an ordered list of actions and compare its final result to the expected status. Can save a replay."
+        description = "Render a saved scene from a camera into a new PNG using a graphics adapter."
+    )]
+    async fn scene_capture(
+        &self,
+        Parameters(input): Parameters<capture::Capture>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let path = self.scene_path(&input.path, true)?;
+        let output = self.workspace_file(&input.output_path, "png", false)?;
+        tokio::task::spawn_blocking(move || {
+            let ([width, height], camera_id) = capture::save(&path, &output, &input)?;
+            Ok(CallToolResult::structured(json!({"output_path": input.output_path, "camera_id":camera_id,"width":width,"height":height})))
+        }).await.map_err(io_error)?
+    }
+
+    #[tool(description = "Create a prefab from an object and its descendants in a saved scene.")]
+    fn prefab_create(
+        &self,
+        Parameters(input): Parameters<CreatePrefab>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.edit_scene(&input.path, |scene| {
+            let id = scene.create_prefab(input.object_id).map_err(invalid)?;
+            Ok(CallToolResult::structured(
+                json!({"prefab_id":id,"name":scene.prefabs[&id].name}),
+            ))
+        })
+    }
+
+    #[tool(
+        description = "Place a linked prefab instance, returning the instance root UUID and undo token."
+    )]
+    fn prefab_instantiate(
+        &self,
+        Parameters(input): Parameters<PlacePrefab>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.scene_apply(Parameters(Batch::place_prefab(input)))
+    }
+
+    #[tool(
+        description = "Refresh a prefab from its linked source and optionally rename it, updating its instances."
+    )]
+    fn prefab_update(
+        &self,
+        Parameters(input): Parameters<UpdatePrefab>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.edit_scene(&input.path, |scene| {
+            let before = scene.clone();
+            let prefab = scene
+                .prefabs
+                .get_mut(&input.prefab_id)
+                .ok_or_else(|| invalid(format!("Unknown prefab {}", input.prefab_id)))?;
+            if let Some(name) = input.name {
+                prefab.name = name;
+            }
+            scene.sync_prefabs(&before).map_err(invalid)?;
+            Ok(CallToolResult::structured(
+                json!({"prefab_id":input.prefab_id,"name":scene.prefabs[&input.prefab_id].name}),
+            ))
+        })
+    }
+
+    #[tool(
+        description = "Link two registered project scenes with a Rhai transition triggered by Interact or an existing HUD button."
+    )]
+    fn scene_transition_set(
+        &self,
+        Parameters(input): Parameters<SceneTransition>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let _lock = self.lock_edits().map_err(io_error)?;
+        let project = Project::load(&self.project_path(&input.path, true)?).map_err(io_error)?;
+        let from = project.resolve(&input.from).map_err(invalid)?;
+        let to = project.resolve(&input.to).map_err(invalid)?;
+        Scene::load(&to).map_err(io_error)?;
+        let before = Scene::load(&from).map_err(io_error)?;
+        let mut scene = before.clone();
+        let trigger = if let Some(button) = &input.button {
+            if button.is_empty()
+                || !scene.hud.iter().any(|widget| {
+                    widget.kind == futty_runtime::HudKind::Button && widget.binding == *button
+                })
+            {
+                return Err(invalid(
+                    "The source scene must contain a HUD button with that binding",
+                ));
+            }
+            format!("hud_pressed({})", json!(button))
+        } else {
+            "input_pressed(\"Interact\")".to_owned()
+        };
+        let index = scene
+            .entities
+            .iter()
+            .position(|object| object.uuid == input.object_id)
+            .ok_or_else(|| invalid("Unknown script host in the source scene"))?;
+        if scene.entities[index].prefab.is_some() {
+            return Err(invalid("Choose an object outside a linked prefab instance"));
+        }
+        let source = format!(
+            "fn on_update(entity, dt) {{ if {trigger} {{ load_scene({}); }} }}",
+            json!(input.to)
+        );
+        let script_id = if let Some(id) = scene.entities[index].script {
+            if scene.script_sources.get(&id) != Some(&source) {
+                return Err(invalid("The script host already has a different script"));
+            }
+            id
+        } else {
+            scripts::check(&source, &input.path, None)?;
+            let id = scripts::register(&mut scene, "Scene transition".into(), source);
+            scripts::assign(&mut scene.entities[index], Some(id));
+            scene.sync_prefabs(&before).map_err(invalid)?;
+            scene.save(&from).map_err(io_error)?;
+            id
+        };
+        Ok(CallToolResult::structured(
+            json!({"from":input.from,"to":input.to,"script_id":script_id}),
+        ))
+    }
+
+    #[tool(
+        description = "Run a saved scene headlessly and check status, final HUD values, collision starts and requested scene. Can save a replay."
     )]
     fn play_test(
         &self,
@@ -249,28 +421,7 @@ impl Futty {
         Parameters(input): Parameters<SceneFile>,
     ) -> Result<CallToolResult, ErrorData> {
         let path = self.scene_path(&input.path, true)?;
-        let issues = match Scene::load(&path) {
-            Ok(scene) => scene
-                .assets
-                .iter()
-                .filter_map(|asset| {
-                    if scene.script_sources.contains_key(&asset.id) {
-                        return None;
-                    }
-                    futty_assets::read_saved(&path, asset).err().map(|error| {
-                        json!({
-                            "field": "assets",
-                            "asset_id": asset.id,
-                            "message": error.to_string(),
-                        })
-                    })
-                })
-                .collect::<Vec<_>>(),
-            Err(error) => vec![match error.downcast_ref::<SceneIssue>() {
-                Some(issue) => json!(issue),
-                None => json!({"field": "scene", "message": error.to_string()}),
-            }],
-        };
+        let issues = scene_issues(&path);
         Ok(CallToolResult::structured(json!({
             "path": input.path, "valid": issues.is_empty(), "issues": issues,
         })))
@@ -303,6 +454,55 @@ impl Futty {
         let path = self.project_path(&input.path, true)?;
         let project = Project::load(&path).map_err(io_error)?;
         Ok(project_info(&project, &input.path))
+    }
+
+    #[tool(
+        description = "Validate the project manifest and every registered scene, including saved asset contents and Rhai scripts.",
+        annotations(read_only_hint = true)
+    )]
+    fn project_validate(
+        &self,
+        Parameters(input): Parameters<ProjectFile>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let path = self.project_path(&input.path, true)?;
+        let project = match Project::load(&path) {
+            Ok(project) => project,
+            Err(error) => {
+                return Ok(CallToolResult::structured(json!({
+                    "path": input.path, "valid": false, "scenes": [],
+                    "issues": [{"field": "manifest", "message": error.to_string()}],
+                })));
+            }
+        };
+        let scenes: Vec<_> = project
+            .list()
+            .scenes
+            .iter()
+            .map(|(id, relative)| {
+                let issues = match project.resolve(id) {
+                    Ok(path) => scene_issues(&path),
+                    Err(error) => vec![json!({"field":"path", "message":error.to_string()})],
+                };
+                json!({"scene_id":id,"path":relative,"valid":issues.is_empty(),"issues":issues})
+            })
+            .collect();
+        Ok(CallToolResult::structured(json!({
+            "path": input.path, "start":project.list().start, "issues": [],
+            "valid": scenes.iter().all(|scene| scene["valid"] == true), "scenes": scenes,
+        })))
+    }
+
+    #[tool(
+        description = "Package a saved multi-scene Futty project and a Windows x64 player into a new folder without opening the editor."
+    )]
+    async fn project_build(
+        &self,
+        Parameters(input): Parameters<BuildProject>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let server = self.clone();
+        tokio::task::spawn_blocking(move || server.build_project(input))
+            .await
+            .map_err(io_error)?
     }
 
     #[tool(
@@ -810,40 +1010,49 @@ impl Futty {
         extension: &str,
         existing: bool,
     ) -> Result<PathBuf, ErrorData> {
-        let relative = Path::new(value);
-        if relative
+        if Path::new(value)
             .extension()
             .and_then(|extension| extension.to_str())
             != Some(extension)
-            || !relative
-                .components()
-                .all(|part| matches!(part, Component::Normal(_)))
         {
             return Err(authoring::invalid(format!(
-                "Use a workspace-relative .{extension} path without parent traversal"
+                "Use a workspace-relative .{extension} path"
             )));
         }
+        let path = self.workspace_path(value, existing)?;
+        if existing
+            && (!path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some(extension))
+        {
+            return Err(invalid(format!("Expected a .{extension} file")));
+        }
+        Ok(path)
+    }
 
+    fn workspace_path(&self, value: &str, existing: bool) -> Result<PathBuf, ErrorData> {
+        let relative = Path::new(value);
+        let name = relative
+            .file_name()
+            .filter(|_| {
+                relative
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+            })
+            .ok_or_else(|| {
+                invalid("Use a non-empty workspace-relative path without parent traversal")
+            })?;
         let joined = self.root.join(relative);
         let path = if existing {
-            let file = joined.canonicalize().map_err(io_error)?;
-            if !file.is_file()
-                || file.extension().and_then(|extension| extension.to_str()) != Some(extension)
-            {
-                return Err(authoring::invalid(format!("Expected a .{extension} file")));
-            }
-            file
+            joined.canonicalize().map_err(io_error)?
         } else {
             let parent = joined
                 .parent()
                 .unwrap_or(&self.root)
                 .canonicalize()
                 .map_err(io_error)?;
-            parent.join(
-                relative
-                    .file_name()
-                    .expect("a path with an extension has a name"),
-            )
+            if !parent.is_dir() {
+                return Err(invalid("The output parent must be a directory"));
+            }
+            parent.join(name)
         };
         if !path.starts_with(&self.root) {
             return Err(ErrorData::invalid_params(
@@ -852,6 +1061,28 @@ impl Futty {
             ));
         }
         Ok(path)
+    }
+
+    fn build_project(&self, input: BuildProject) -> Result<CallToolResult, ErrorData> {
+        let _lock = self.lock_edits().map_err(io_error)?;
+        let project = self.project_path(&input.path, true)?;
+        let output = self.workspace_path(&input.output_path, false)?;
+        let template = self.workspace_file(
+            input
+                .template_path
+                .as_deref()
+                .unwrap_or("dist/futty-editor.exe"),
+            "exe",
+            true,
+        )?;
+        futty_build::validate_windows_template(&template).map_err(invalid)?;
+        futty_build::export(&project, &output, Camera::default(), &template).map_err(io_error)?;
+        let folder = input.output_path.trim_end_matches(['/', '\\']);
+        Ok(CallToolResult::structured(json!({
+            "output_path":folder,
+            "executable":format!("{folder}/Game.exe"),
+            "manifest":format!("{folder}/{}", futty_build::MANIFEST),
+        })))
     }
 
     fn edit_scene(
@@ -896,6 +1127,53 @@ impl Futty {
         lock.lock()?;
         Ok(lock)
     }
+}
+
+fn scene_issues(path: &Path) -> Vec<serde_json::Value> {
+    let scene = match Scene::load(path) {
+        Ok(scene) => scene,
+        Err(error) => {
+            return vec![match error.downcast_ref::<SceneIssue>() {
+                Some(issue) => json!(issue),
+                None => json!({"field": "scene", "message": error.to_string()}),
+            }];
+        }
+    };
+    scene
+        .assets
+        .iter()
+        .filter_map(|asset| {
+            let issue = if let Some(source) = scene.script_sources.get(&asset.id) {
+                futty_runtime::inspect_script_diagnostic(source)
+                    .err()
+                    .map(|issue| json!(issue))
+            } else {
+                match futty_assets::read_saved(path, asset) {
+                    Ok(bytes) if asset.kind == AssetKind::Script => {
+                        match futty_assets::script_source(&bytes) {
+                            Ok(source) => futty_runtime::inspect_script_diagnostic(source)
+                                .err()
+                                .map(|issue| json!(issue)),
+                            Err(error) => Some(json!({"message":error.to_string()})),
+                        }
+                    }
+                    Ok(bytes) => assets::validate_asset(&scene, asset, &bytes)
+                        .err()
+                        .map(|error| json!({"message":error.message})),
+                    Err(error) => Some(json!({"message":error.to_string()})),
+                }
+            };
+            issue.map(|mut issue| {
+                issue["field"] = json!(if asset.kind == AssetKind::Script {
+                    "script"
+                } else {
+                    "assets"
+                });
+                issue["asset_id"] = json!(asset.id);
+                issue
+            })
+        })
+        .collect()
 }
 
 fn project_info(project: &Project, path: &str) -> CallToolResult {
@@ -975,6 +1253,126 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_build_publishes_a_portable_package_and_rejects_existing_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let server = Futty::new(root.clone());
+        let manifest = "Game.futty.project.ron";
+        for name in ["Lobby.ron", "Level.ron"] {
+            Scene::default().save_new(&root.join(name)).unwrap();
+        }
+        server
+            .project_create(Parameters(NewProject {
+                path: manifest.into(),
+                start: "lobby".into(),
+                scenes: [
+                    ("lobby".into(), "Lobby.ron".into()),
+                    ("level".into(), "Level.ron".into()),
+                ]
+                .into(),
+            }))
+            .unwrap();
+        let template = root.join("Template.exe");
+        let build = |output_path: &str| {
+            server.build_project(BuildProject {
+                path: manifest.into(),
+                output_path: output_path.into(),
+                template_path: Some("Template.exe".into()),
+            })
+        };
+        fs::write(&template, b"not a windows executable").unwrap();
+        assert!(build("Build").is_err());
+        assert!(!root.join("Build").exists());
+        let mut exe = [0_u8; 70];
+        exe[..2].copy_from_slice(b"MZ");
+        exe[60..64].copy_from_slice(&64_u32.to_le_bytes());
+        exe[64..].copy_from_slice(b"PE\0\0\x64\x86");
+        fs::write(&template, exe).unwrap();
+        assert!(build("../Build").is_err());
+        let result = build("Build").unwrap().structured_content.unwrap();
+        assert_eq!(result["executable"], "Build/Game.exe");
+        assert_eq!(fs::read(root.join("Build/Game.exe")).unwrap(), exe);
+        assert!(root.join("Build/Scenes/0/game.futty.scene.ron").is_file());
+        assert!(root.join("Build/Scenes/1/game.futty.scene.ron").is_file());
+        assert!(root.join("Build").join(futty_build::MANIFEST).is_file());
+        assert!(build("Build").is_err());
+    }
+
+    #[test]
+    fn validates_project_assets_and_checks_playtest_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let server = Futty::new(root.clone());
+        let path = "Main.ron";
+        let manifest = "Check.futty.project.ron";
+        let mut scene = Scene::default();
+        let mut floor = Object::cube("Floor".into(), Vec3::Y * -0.25);
+        floor.transform.scale = Vec3::new(6.0, 0.5, 6.0);
+        floor.body = Some(futty_runtime::Body {
+            motion: futty_runtime::Motion::Fixed,
+            ..Default::default()
+        });
+        floor.spin = false;
+        let mut falling = Object::cube("Falling".into(), Vec3::Y * 3.0);
+        falling.body = Some(futty_runtime::Body::default());
+        let mut sensor = Object::cube("Sensor".into(), Vec3::Y * 1.5);
+        sensor.body = Some(futty_runtime::Body {
+            motion: futty_runtime::Motion::Fixed,
+            size: Vec3::new(2.0, 0.2, 2.0),
+            sensor: true,
+            ..Default::default()
+        });
+        let (first, second) = (falling.uuid, sensor.uuid);
+        let mut camera = camera_object("Player".into(), [0.0, 2.0, 4.0], [0.0, 2.0, 0.0]).unwrap();
+        camera.character = Some(Default::default());
+        camera.script = Some(scripts::register(
+            &mut scene,
+            "Score".into(),
+            "fn on_start(entity) { set_hud(\"score\", 3); }".into(),
+        ));
+        let script = camera.script.unwrap();
+        let mut hud = HudWidget::new(futty_runtime::HudKind::Text);
+        hud.binding = "score".into();
+        scene.hud.push(hud);
+        scene.entities.extend([floor, sensor, falling, camera]);
+        scene.save_new(&root.join(path)).unwrap();
+        server
+            .project_create(Parameters(NewProject {
+                path: manifest.into(),
+                start: "main".into(),
+                scenes: [("main".into(), path.into())].into(),
+            }))
+            .unwrap();
+        let validate = || {
+            server
+                .project_validate(Parameters(ProjectFile {
+                    path: manifest.into(),
+                }))
+                .unwrap()
+                .structured_content
+                .unwrap()
+        };
+        assert_eq!(validate()["valid"], true);
+        let play = |score| {
+            server.play_test(Parameters(serde_json::from_value(json!({
+            "path":path, "steps":[{"actions":[],"ticks":120}], "expect":"running",
+            "expect_hud":{"score":score}, "expect_collisions":[{"first":first,"second":second,"sensor":true}]
+        })).unwrap())).unwrap().structured_content.unwrap()
+        };
+        let result = play(3);
+        assert_eq!(result["passed"], true, "{result}");
+        assert!(result["checks"][1]["first_tick"].is_u64());
+        assert_eq!(play(5)["passed"], false);
+        scene
+            .script_sources
+            .insert(script, "fn on_start(entity) {\n let x = ;\n}".into());
+        scene.save(&root.join(path)).unwrap();
+        let invalid = validate();
+        assert_eq!(invalid["valid"], false);
+        assert_eq!(invalid["scenes"][0]["issues"][0]["line"], 2);
+    }
 
     #[test]
     fn validates_scenes_and_persists_editor_project_start() {
@@ -1248,6 +1646,89 @@ mod tests {
         let logs: Vec<_> = runtime.script_log().collect();
         assert_eq!(logs.len(), 1, "{logs:?}");
         assert!(logs[0].contains("escape_complete"), "{logs:?}");
+    }
+
+    #[test]
+    fn prefab_and_transition_tools_use_saved_scenes() {
+        let folder = tempfile::tempdir().unwrap();
+        let server = Futty::new(folder.path().canonicalize().unwrap());
+        let from = "Lobby.ron";
+        let to = "Results.ron";
+        let lobby = Scene::default();
+        let host = lobby.entities[0].uuid;
+        lobby.save_new(&server.root.join(from)).unwrap();
+        Scene::default().save_new(&server.root.join(to)).unwrap();
+        let prefab_id = serde_json::from_value(
+            server
+                .prefab_create(Parameters(CreatePrefab {
+                    path: from.into(),
+                    object_id: host,
+                }))
+                .unwrap()
+                .structured_content
+                .unwrap()["prefab_id"]
+                .clone(),
+        )
+        .unwrap();
+        let placed = server
+            .prefab_instantiate(Parameters(PlacePrefab {
+                path: from.into(),
+                prefab_id,
+                position: [5.0, 0.0, 0.0],
+            }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert!(placed["objects"]["instance"].is_string());
+        assert!(placed["undo_token"].is_string());
+        server
+            .prefab_update(Parameters(UpdatePrefab {
+                path: from.into(),
+                prefab_id,
+                name: Some("Reused cube".into()),
+            }))
+            .unwrap();
+        let manifest = "Game.futty.project.ron";
+        server
+            .project_create(Parameters(NewProject {
+                path: manifest.into(),
+                start: "lobby".into(),
+                scenes: [("lobby".into(), from.into()), ("results".into(), to.into())].into(),
+            }))
+            .unwrap();
+        let transition = |target: &str| {
+            server.scene_transition_set(Parameters(SceneTransition {
+                path: manifest.into(),
+                from: "lobby".into(),
+                to: target.into(),
+                object_id: host,
+                button: None,
+            }))
+        };
+        assert!(transition("unknown").is_err());
+        let link = transition("results").unwrap().structured_content.unwrap();
+        assert_eq!(
+            transition("results").unwrap().structured_content.unwrap(),
+            link
+        );
+        let saved = Scene::load(&server.root.join(from)).unwrap();
+        assert_eq!(saved.prefabs[&prefab_id].name, "Reused cube");
+        assert_eq!(saved.script_sources.len(), 1);
+        let batch = serde_json::from_value(json!({"path":from,"edits":[
+            {"op":"add_camera","key":"camera","name":"Player","position":[0,2,4],"target":[0,2,0],"character":true}
+        ]})).unwrap();
+        server.scene_apply(Parameters(batch)).unwrap();
+        let run = serde_json::from_value(
+            json!({"path":from,"steps":[{"actions":["interact"],"ticks":2}],"expect":"scene_transition","expect_scene":"results"}),
+        )
+        .unwrap();
+        let result = server
+            .play_test(Parameters(run))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(result["passed"], true);
+        assert_eq!(result["last_observation"]["requested_scene"], "results");
     }
 
     #[test]

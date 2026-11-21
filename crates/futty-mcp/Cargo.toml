@@ -7,12 +7,17 @@ rust-version.workspace = true
 [dependencies]
 futty-assets.workspace = true
 futty-audio.workspace = true
+futty-build.workspace = true
 futty-core.workspace = true
+futty-render.workspace = true
 futty-runtime.workspace = true
 glam.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
+pollster = "1"
 rmcp = { version = "3.11", default-features = false, features = ["macros", "server", "transport-io"] }
 serde.workspace = true
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
 uuid.workspace = true
+wgpu = { workspace = true, features = ["vulkan", "dx12"] }

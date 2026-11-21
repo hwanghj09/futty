@@ -222,6 +222,8 @@ impl Physics {
 
     pub(crate) fn prepare_queries(&mut self) {
         self.world.detect_collisions(&(), &self.collector);
+        // The collision-only pass consumes modifications before the solver can register active bodies.
+        self.world.bodies.iter_mut().for_each(drop);
         self.prepared = true;
     }
 

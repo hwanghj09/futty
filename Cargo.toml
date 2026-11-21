@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/futty-assets", "crates/futty-audio", "crates/futty-core", "crates/futty-editor", "crates/futty-mcp", "crates/futty-render", "crates/futty-runtime"]
+members = ["crates/futty-assets", "crates/futty-audio", "crates/futty-build", "crates/futty-core", "crates/futty-editor", "crates/futty-mcp", "crates/futty-render", "crates/futty-runtime"]
 resolver = "3"
 
 [workspace.package]
@@ -15,5 +15,6 @@ wgpu = { version = "30", default-features = false, features = ["std", "wgsl"] }
 futty-core = { path = "crates/futty-core" }
 futty-assets = { path = "crates/futty-assets" }
 futty-audio = { path = "crates/futty-audio" }
+futty-build = { path = "crates/futty-build" }
 futty-render = { path = "crates/futty-render" }
 futty-runtime = { path = "crates/futty-runtime" }

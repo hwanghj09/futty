@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     error::Error,
     fs, io,
     path::{Path, PathBuf},
@@ -7,13 +7,14 @@ use std::{
 
 use eframe::{egui, egui_wgpu::RenderState};
 use futty_audio::Audio;
-use futty_core::{
-    Asset, AssetKind, Camera, CameraLens, CameraView, LightKind, Projection, Transform,
-};
-use futty_render::{DrawObject, LightInstance, MAX_LIGHTS, RenderScene};
+use futty_build::{FORMAT, Launch, SCENE};
+pub(crate) use futty_build::{MANIFEST, export};
+#[cfg(test)]
+use futty_core::Asset;
+use futty_core::{AssetKind, Camera};
+pub(crate) use futty_render::draw_objects;
 use futty_runtime::{Hierarchy, Runtime, Scene};
-use glam::{Mat4, Vec3};
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use uuid::Uuid;
 
 use crate::{
@@ -23,289 +24,6 @@ use crate::{
     range_view::RangeControls,
     viewport::Viewport,
 };
-
-pub(crate) const MANIFEST: &str = "game.futty.build.ron";
-const SCENE: &str = "game.futty.scene.ron";
-const FORMAT: u32 = 1;
-
-#[derive(Serialize, Deserialize)]
-struct Launch {
-    format: u32,
-    camera: Camera,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    project: Option<SceneList>,
-}
-
-pub(crate) fn export(
-    source: &Path,
-    destination: &Path,
-    camera: Camera,
-    executable: &Path,
-) -> Result<(), Box<dyn Error>> {
-    if destination.try_exists()? {
-        return Err("Choose a new output folder. The destination already exists.".into());
-    }
-    let parent = destination
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let stage = tempfile::Builder::new()
-        .prefix(".futty-build-")
-        .tempdir_in(parent)?;
-    let project = if project::is_project(source) {
-        let project = Project::load(source)?;
-        let mut list = project.list().clone();
-        for (index, (id, entry)) in list.scenes.iter_mut().enumerate() {
-            let folder = format!("Scenes/{index}");
-            fs::create_dir_all(stage.path().join(&folder))?;
-            *entry = format!("{folder}/{SCENE}");
-            copy_scene(&project.resolve(id)?, &stage.path().join(&*entry))
-                .map_err(|error| format!("Scene {id}: {error}"))?;
-        }
-        Some(list)
-    } else {
-        copy_scene(source, &stage.path().join(SCENE))?;
-        None
-    };
-    let launch = Launch {
-        format: if project.is_some() { 2 } else { FORMAT },
-        camera,
-        project,
-    };
-    fs::write(stage.path().join(MANIFEST), ron::to_string(&launch)?)?;
-    fs::copy(executable, stage.path().join("Game.exe"))?;
-    fs::rename(stage.path(), destination)?;
-    Ok(())
-}
-
-fn copy_scene(source: &Path, entry: &Path) -> Result<(), Box<dyn Error>> {
-    let mut scene = Scene::load(source)?;
-    for object in &mut scene.entities {
-        object.prefab = None;
-    }
-    if scene.entities.iter().all(|object| object.script.is_none()) {
-        scene.prefabs.clear();
-    } else {
-        for prefab in scene.prefabs.values_mut() {
-            prefab.source = None;
-        }
-    }
-    let referenced_materials: HashSet<_> = scene
-        .referenced_objects()
-        .filter_map(|object| object.material)
-        .collect();
-    scene
-        .materials
-        .retain(|id, _| referenced_materials.contains(id));
-    let mut used: HashSet<_> = scene
-        .referenced_objects()
-        .flat_map(|object| {
-            [
-                object.mesh,
-                object.texture,
-                object.sprite.map(|sprite| sprite.texture),
-                object.script,
-                object.audio_source.map(|audio| audio.clip),
-            ]
-            .into_iter()
-            .flatten()
-        })
-        .collect();
-    used.extend(
-        scene
-            .materials
-            .values()
-            .filter_map(|material| material.texture),
-    );
-    used.extend(scene.hud.iter().filter_map(|widget| widget.image));
-    scene.assets.retain(|asset| used.contains(&asset.id));
-    scene.script_sources.retain(|id, _| used.contains(id));
-    let mut audio = Audio::default();
-    for asset in &scene.assets {
-        if let Some(source_code) = scene.script_sources.get(&asset.id) {
-            check_script(asset, source_code)?;
-            continue;
-        }
-        let bytes = futty_assets::read_saved(source, asset)
-            .map_err(|error| format!("{}: {error}", asset.name))?;
-        validate_asset(asset, &bytes, &mut audio)
-            .map_err(|error| format!("{}: {error}", asset.name))?;
-        futty_assets::save(entry, asset, &bytes)?;
-    }
-    scene.save(entry)
-}
-
-fn validate_asset(asset: &Asset, bytes: &[u8], audio: &mut Audio) -> Result<(), Box<dyn Error>> {
-    match asset.kind {
-        AssetKind::Model => {
-            futty_assets::model(bytes)?;
-        }
-        AssetKind::Texture => {
-            futty_assets::png(bytes)?;
-        }
-        AssetKind::Script => check_script(asset, futty_assets::script_source(bytes)?)?,
-        AssetKind::Wav | AssetKind::Ogg => audio.load(asset.id, asset.kind.extension(), bytes)?,
-    }
-    Ok(())
-}
-
-fn check_script(asset: &Asset, source: &str) -> Result<(), Box<dyn Error>> {
-    futty_runtime::inspect_script(source)
-        .map(|_| ())
-        .map_err(|error| format!("{}: {error}", asset.name).into())
-}
-
-pub(crate) struct SceneFrame {
-    pub world: Vec<Mat4>,
-    pub local: Vec<Transform>,
-    pub instances: Vec<DrawObject>,
-    pub lights: Vec<LightInstance>,
-    pub view: CameraView,
-}
-
-impl SceneFrame {
-    pub fn render_scene(&self, aspect: f32, sky: bool) -> RenderScene<'_> {
-        RenderScene {
-            view_projection: self.view.view_projection(aspect),
-            camera_position: self.view.eye,
-            sky_clip_to_world: sky.then(|| {
-                let lens = match self.view.lens.projection {
-                    Projection::Perspective => self.view.lens,
-                    Projection::Orthographic => CameraLens::default(),
-                };
-                CameraView {
-                    eye: Vec3::ZERO,
-                    lens,
-                    ..self.view
-                }
-                .view_projection(aspect)
-                .inverse()
-            }),
-            objects: &self.instances,
-            lights: &self.lights,
-            grid: false,
-        }
-    }
-}
-
-pub(crate) fn draw_objects(
-    scene: &Scene,
-    hierarchy: &Hierarchy,
-    runtime: Option<&mut Runtime>,
-    camera: Camera,
-    camera_index: Option<usize>,
-    selected: &[Uuid],
-    preview: Option<&HashMap<Uuid, Transform>>,
-) -> SceneFrame {
-    let (state, animations, spawned) = runtime.map_or_else(
-        || (HashMap::new(), HashMap::new(), &[][..]),
-        |runtime| {
-            let state = runtime
-                .extract()
-                .map(|(id, transform, color)| (id, (transform, color)))
-                .collect();
-            let animations = runtime.animated_objects().collect::<HashMap<_, _>>();
-            (state, animations, runtime.spawned_objects())
-        },
-    );
-    let mut combined = Vec::new();
-    let mut combined_hierarchy = None;
-    if !spawned.is_empty() {
-        combined.extend_from_slice(&scene.entities);
-        combined.extend_from_slice(spawned);
-        combined_hierarchy = Hierarchy::new(&combined).ok();
-    }
-    let (objects, hierarchy) = combined_hierarchy
-        .as_ref()
-        .map_or((&scene.entities, hierarchy), |hierarchy| {
-            (&combined, hierarchy)
-        });
-    let local: Vec<_> = objects
-        .iter()
-        .map(|object| {
-            preview
-                .and_then(|preview| preview.get(&object.uuid).copied())
-                .or_else(|| state.get(&object.uuid).map(|&(transform, _)| transform))
-                .unwrap_or(object.transform)
-        })
-        .collect();
-    let world = hierarchy.world_matrices(|index| local[index].matrix());
-    let view = camera_index
-        .and_then(|index| scene.camera_view(index, hierarchy, &world, &local))
-        .unwrap_or_else(|| camera.view());
-    let instances = objects
-        .iter()
-        .zip(&world)
-        .filter(|(object, _)| object.has_renderer())
-        .map(|(object, &matrix)| {
-            let material = object
-                .material
-                .filter(|_| object.sprite.is_none())
-                .and_then(|id| scene.materials.get(&id));
-            let tint = state
-                .get(&object.uuid)
-                .map_or(object.color, |&(_, color)| color);
-            DrawObject {
-                matrix: object
-                    .sprite
-                    .map_or(matrix, |sprite| sprite.matrix(matrix, view)),
-                color: material.map_or(tint, |material| {
-                    std::array::from_fn(|i| tint[i] * material.color[i])
-                }),
-                selected: selected.contains(&object.uuid),
-                mesh: object.mesh,
-                primitive: object.primitive,
-                texture: material.map_or_else(
-                    || {
-                        object
-                            .sprite
-                            .map(|sprite| sprite.texture)
-                            .or(object.texture)
-                    },
-                    |material| material.texture,
-                ),
-                surface: material.map_or_else(Default::default, |material| material.surface),
-                material_override: material.is_some(),
-                sprite: object.sprite.is_some(),
-                animation: animations
-                    .get(&object.uuid)
-                    .copied()
-                    .or_else(|| object.animation.map(|animation| (animation, 0.0)))
-                    .map(|(animation, seconds)| futty_assets::AnimationSample {
-                        clip: animation.clip,
-                        seconds,
-                        looping: animation.looping,
-                    }),
-            }
-        })
-        .collect();
-    let lights = objects
-        .iter()
-        .enumerate()
-        .filter_map(|(index, object)| {
-            let light = object.light?;
-            let position = world[index].w_axis.truncate();
-            let toward_light = if light.kind == LightKind::Directional {
-                hierarchy.world_rotation(index, |i| local[i].rotation) * Vec3::Z
-            } else {
-                Vec3::ZERO
-            };
-            (position.is_finite() && toward_light.is_finite()).then_some(LightInstance {
-                light,
-                position,
-                toward_light,
-            })
-        })
-        .take(MAX_LIGHTS)
-        .collect();
-    SceneFrame {
-        world,
-        local,
-        view,
-        instances,
-        lights,
-    }
-}
 
 pub(crate) struct Player {
     world: GameScene,
@@ -751,7 +469,7 @@ mod tests {
         scene.entities[0].transform.rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
         let mut sun = Object::cube("Sun".into(), Vec3::Z);
         sun.parent = Some(scene.entities[0].uuid);
-        sun.light = Some(Light::new(LightKind::Directional));
+        sun.light = Some(Light::new(futty_core::LightKind::Directional));
         scene.entities.push(sun);
         let frame = draw_objects(
             &scene,

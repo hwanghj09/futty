@@ -231,7 +231,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Cli
 ```
 
 - `project_inspect`는 `path`에 해당하는 프로젝트의 씬 목록과 시작 씬 ID를 반환합니다.
+- `project_validate`는 프로젝트 파일의 `path`를 받아 시작 씬 설정과 등록된 씬을 검사합니다. 씬별로 구조 오류, 누락되거나 읽을 수 없는 에셋, Rhai 오류를 반환합니다. 스크립트 오류의 줄·열은 Rhai가 위치를 제공할 때 표시됩니다.
 - `project_set_start_scene`에는 프로젝트의 `path`와 새 시작 씬 ID인 `start`를 넘깁니다. 이미 등록되어 있고 불러올 수 있는 씬을 선택해야 합니다.
+
+## MCP 프리팹과 씬 전환
+
+- `prefab_create`에 씬 `path`와 원본 `object_id`를 넘기면 오브젝트와 자식으로 프리팹을 만듭니다.
+- `prefab_instantiate`에 `path`, `prefab_id`, `position`을 넘기면 연결된 인스턴스를 배치하고 루트 UUID와 Undo 토큰을 반환합니다. 일괄 편집에서는 `place_prefab`을 쓸 수 있습니다.
+- `prefab_update`에 `path`, `prefab_id`, 선택적인 `name`을 넘기면 프리팹과 연결된 인스턴스를 갱신합니다. 구성은 원본 오브젝트를 편집합니다.
+- `scene_transition_set`은 프로젝트 파일 `path`, 출발 씬 ID `from`, 도착 씬 ID `to`, 출발 씬의 `object_id`를 받습니다. 기본 트리거는 Interact이며, `button`에는 기존 HUD 버튼의 바인딩을 지정할 수 있습니다. 이 도구는 전환용 Rhai 스크립트를 연결하며 기존 스크립트를 보존합니다.
+
+## MCP 카메라 PNG 캡처
+
+`scene_capture`에 저장된 씬 `path`와 새 PNG의 `output_path`를 넘기면 카메라 화면을 파일로 저장합니다. 두 경로는 MCP 작업 폴더 기준입니다. `camera_id`를 지정해 다른 카메라를 선택하거나 생략해서 메인 카메라를 사용합니다. 크기는 기본 1280×720이고 가로·세로 각각 1~2048픽셀로 지정할 수 있습니다.
+
+```json
+{"path":"examples/agent-escape/Beacon Bot Escape.futty.scene.ron","output_path":"escape.png","width":960,"height":540}
+```
+
+캡처에는 그래픽 어댑터가 필요합니다. 에디터 창을 열지 않고 저장된 씬의 3D 화면을 렌더링합니다. HUD와 실행 중 스크립트 상태는 포함되지 않습니다. 기존 PNG는 보존됩니다.
 
 ## AI 플레이 세션
 
@@ -255,6 +273,12 @@ Futty MCP의 플레이 도구는 저장된 씬에서 창 없이 게임을 실행
 Rhai의 `finish_game("success")` 또는 `finish_game("failure")`로 플레이 결과를 지정합니다. 제한에 도달하면 `tick_limit`이 반환됩니다. 현재 세션은 단일 씬에서 실행하며, `load_scene()` 요청이 있으면 `scene_transition`과 대상 ID를 반환하고 진행을 멈춥니다. Pulse Range 전용 입력을 쓰는 씬은 에디터나 단독 게임에서 실행합니다.
 
 ## 자동 플레이테스트와 리플레이
+
+`play_test`의 `expect`에는 기존처럼 최종 상태를 지정합니다. 여기에 아래 조건을 추가하면 모든 조건이 맞을 때만 `passed`가 참입니다. `checks`에서 조건별 결과를 확인할 수 있습니다.
+
+- `expect_hud`에는 종료 시점의 점수나 체력 값을 지정합니다. 예를 들어 `{"score":3}`은 HUD에 바인딩된 `score` 값을 확인합니다.
+- `expect_collisions`의 각 항목에는 두 오브젝트 UUID인 `first`와 `second`를 지정합니다. `sensor: false`는 물리 충돌, `sensor: true`는 트리거 진입을 확인합니다. 관찰된 첫 틱은 `first_tick`에 반환됩니다.
+- `expect_scene`에는 예상 전환 대상 ID를 지정합니다. 예를 들어 `"expect":"scene_transition","expect_scene":"results"`는 정확한 전환 요청이 발생했는지 확인합니다. 헤드리스 테스트는 요청 시점에 멈춥니다.
 
 | 도구 | 사용 방법 |
 | --- | --- |
@@ -352,6 +376,14 @@ fn on_update(entity, dt) {
 **File → Export Windows Game…**에서 저장한 씬의 출력 위치를 선택합니다. 만들어진 `*-Windows` 폴더는 씬, 참조 에셋, 실행 설정과 `Game.exe`를 포함합니다. 폴더 전체를 옮긴 뒤 `Game.exe`를 실행하면 에디터 없이 게임이 열립니다. 씬에 카메라가 없으면 내보내기 당시의 Scene 카메라로 실행합니다.
 
 프로젝트를 열어 둔 상태에서는 **Export Windows Project…**로 등록한 모든 씬과 참조 에셋을 묶습니다. `Game.exe`는 시작 씬에서 열립니다.
+
+MCP에서는 `project_build`를 사용합니다. 에디터를 열지 않고 프로젝트에 등록된 씬과 그 참조 에셋을 새 폴더에 묶습니다. 결과는 `output_path`, `executable`, `manifest`를 반환합니다.
+
+```json
+{"path":"examples/pulse-range/Pulse Range.futty.project.ron","output_path":"Pulse-Range-Windows"}
+```
+
+입력과 출력은 MCP 작업 폴더 기준입니다. 기본 플레이어는 저장소의 `dist/futty-editor.exe`이며, 다른 Windows x64 Futty 빌드를 사용하려면 `template_path`를 넘깁니다. 출력은 아직 없는 폴더여야 합니다. 완성된 Windows 빌드는 폴더 전체를 옮긴 다음 `Game.exe`를 실행하세요.
 
 Windows x64에서 CLI로도 실행할 수 있습니다. Futty는 새 콘솔 창을 열지 않습니다. PowerShell에서 `| Out-Host`를 붙이면 내보내기가 끝날 때까지 기다리고 결과를 현재 터미널에서 확인할 수 있습니다. 출력은 아직 없는 폴더를 지정합니다. 씬에 카메라가 없으면 CLI는 기본 카메라를 사용합니다.
 

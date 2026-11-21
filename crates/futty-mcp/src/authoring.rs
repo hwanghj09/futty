@@ -247,6 +247,17 @@ impl Properties {
 }
 
 impl Batch {
+    pub fn place_prefab(input: crate::PlacePrefab) -> Self {
+        Self {
+            path: input.path,
+            edits: vec![Operation::PlacePrefab {
+                key: "instance".into(),
+                prefab_id: input.prefab_id,
+                position: input.position,
+            }],
+        }
+    }
+
     pub fn attach_script(input: crate::scripts::AttachScript) -> Self {
         Self {
             path: input.path,

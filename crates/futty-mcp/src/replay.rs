@@ -42,8 +42,27 @@ pub(crate) struct PlayTest {
     pub steps: Vec<Controls>,
     /// Expected final status. Defaults to success.
     pub expect: Option<Status>,
+    /// Expected final values of named HUD bindings.
+    #[serde(default)]
+    pub expect_hud: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Required collision or trigger starts, in either object order.
+    #[serde(default)]
+    pub expect_collisions: Vec<ExpectedCollision>,
+    /// Expected requested destination scene ID.
+    pub expect_scene: Option<String>,
     /// Optional new workspace-relative replay .json file.
     pub replay_path: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExpectedCollision {
+    #[schemars(with = "String")]
+    pub first: Uuid,
+    #[schemars(with = "String")]
+    pub second: Uuid,
+    /// True for trigger entry; false for solid collision. Omit to accept either.
+    pub sensor: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize)]

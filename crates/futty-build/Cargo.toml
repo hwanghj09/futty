@@ -1,0 +1,14 @@
+[package]
+name = "futty-build"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+futty-assets.workspace = true
+futty-audio.workspace = true
+futty-core.workspace = true
+futty-runtime.workspace = true
+serde.workspace = true
+ron = "0.12"
+tempfile = "3"

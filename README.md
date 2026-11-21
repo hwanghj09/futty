@@ -138,6 +138,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1
 - [에디터와 MCP 사용 가이드](docs/guide.md)
 - [게임 제작 및 검증 스킬](docs/game-skills.md)
 - [AI-first 개발 로드맵](docs/ai-roadmap.md)
+- [원스톱 AI 디자인·모델링·애니메이션·사운드 제작 계획](docs/one-shot-asset-pipeline.md) · [초기 프로토타입 에셋 생성기](scripts/generate-prototype-assets.py)
 - [현재 구현과 다음 개발 순서](docs/development-checklist.md)
 
 ## 저장소 구조

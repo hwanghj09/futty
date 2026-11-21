@@ -14,6 +14,10 @@ Read:
 - [Futty MCP 도구 안내](../../../docs/guide.md)
 - [에셋 제작 참고 스킬](../../../docs/game-skills.md)
 
+## Discover the user's intent before production
+
+When the user gives only a broad idea (for example, "make an FPS" or "plan a horror game"), apply [futty-idea-interview](../futty-idea-interview/SKILL.md) before deciding visuals, game loop, art, sound, and scope. Multiple rounds of useful questions are preferred over making up the creator's mental image. If the request is already detailed or the user requests immediate implementation, skip excessive interviewing and label necessary assumptions. Use the resulting confirmed Game Brief throughout asset generation and gameplay development.
+
 ## Mandatory workflow
 
 1. **Check actual capabilities first.** Read current crate/API definitions and MCP tool names. Never present a planned API as available. Currently the engine can import PNG, GLB, WAV and OGG; external generative image/3D/audio providers are not built into Futty.

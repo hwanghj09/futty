@@ -5,6 +5,8 @@ description: Design a Futty game or prototype around a playable loop, a small sc
 
 # Futty Game Design
 
+If the user's game concept is vague, or they explicitly want ideation/planning, start with [futty-idea-interview](../futty-idea-interview/SKILL.md). Ask about their imagined first scene, desired game feel and core fun through adaptive, choice-based follow-ups. Do not invent the user's creative preferences or jump into scene production prematurely. Once enough is confirmed (or the user asks to proceed), distinguish confirmed decisions from AI assumptions, then design the gameplay.
+
 Turn the user's premise into a playable first scene. Reuse existing Futty input actions, collision bodies, tags, Rhai events, and HUD bindings when they fit.
 
 - Specify what the player can see and do, the goal, and the events that prove success or failure.

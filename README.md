@@ -12,6 +12,10 @@ Futty는 **AI 에이전트가 MCP로 3D 게임을 만들고 검증할 수 있도
 
 ![Futty Editor에서 Pulse Range를 연 화면. 왼쪽에 오브젝트 계층과 1인칭 미리보기, 오른쪽에 3D 뷰포트와 카메라 속성이 보입니다.](docs/images/futty-editor.jpg)
 
+## 게임 아이디어부터 시작하기
+
+**[futty-idea-interview 스킬](.agents/skills/futty-idea-interview/SKILL.md)**은 "FPS 게임 만들어줘"처럼 아이디어가 아직 모호할 때 사용자의 머릿속 게임을 단계별 질문으로 구체화합니다. 참조 게임의 플레이 감각, 첫 장면, 핵심 재미, 전투·맵·비주얼·사운드 등에서 선택지와 후속 질문을 제공하며, 확정된 답은 [게임 기획 스킬](.agents/skills/futty-game-design/SKILL.md) 및 [원스톱 제작 스킬](.agents/skills/futty-one-shot-game/SKILL.md)로 연결합니다. 질문은 사용자가 충분히 답하거나 바로 제작해 달라고 할 때 중지합니다.
+
 ## 사람용 시작 안내
 
 | 하고 싶은 일 | 시작 방법 |

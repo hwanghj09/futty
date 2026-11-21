@@ -44,6 +44,10 @@ Futty에서 게임을 기획하고 제작하며 플레이로 검증할 때 쓸 A
 - OpenAI Game Studio의 플러그인 메타데이터에는 MIT가 표시됩니다. 스킬 파일을 함께 배포할 때는 포함할 참조 문서, 스크립트, 에셋의 출처와 조건도 확인합니다. [Game Studio 플러그인 메타데이터](https://github.com/openai/plugins/blob/main/plugins/game-studio/.codex-plugin/plugin.json)
 - Unity Skills는 Unity 의존 프로젝트용 Companion License를 명시합니다. Futty에서는 위 스킬의 작업 흐름을 참고하고, Futty MCP와 런타임용 절차를 작성합니다. [Unity Skills LICENSE](https://github.com/Unity-Technologies/skills/blob/main/LICENSE.md)
 
+## AI 원스톱 게임 제작 스킬
+
+[**futty-one-shot-game**](../.agents/skills/futty-one-shot-game/SKILL.md)은 한 번의 요구사항에서 디자인→모델/스프라이트→애니메이션→사운드→씬 연결→테스트→빌드까지 안내하는 AI-first 제작 워크플로입니다. 현재 지원되는 기능과 [추후 생성기 연동 계획](one-shot-asset-pipeline.md)을 구분하며, 프로토타입 에셋 생성기를 사용할 수 있습니다.
+
 ## Futty 기본 팩 후보
 
 [게임 기획](../.agents/skills/futty-game-design/SKILL.md), [씬 제작](../.agents/skills/futty-scene-authoring/SKILL.md), [Rhai 규칙](../.agents/skills/futty-rhai-gameplay/SKILL.md), [AI 플레이](../.agents/skills/futty-ai-player/SKILL.md)는 저장소의 `.agents/skills/`에 들어 있습니다. [Beacon Bot Escape](../examples/agent-escape/Beacon%20Bot%20Escape.futty.scene.ron)에서 씬 제작부터 AI 탈출까지 실행할 수 있습니다.

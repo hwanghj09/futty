@@ -1660,6 +1660,18 @@ mod tests {
             .structured_content
             .unwrap();
         assert_eq!(valid["valid"], true, "{valid}");
+        let mut idle = generated["playtest"].clone();
+        idle["steps"] = json!([{"ticks":120}]);
+        let missed = server
+            .play_test(Parameters(serde_json::from_value(idle).unwrap()))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(missed["passed"], false, "{missed}");
+        assert_eq!(
+            missed["last_observation"]["hud"]["coins"].as_f64(),
+            Some(0.0)
+        );
         let input = serde_json::from_value(generated["playtest"].clone()).unwrap();
         let outcome = server
             .play_test(Parameters(input))
@@ -1671,6 +1683,84 @@ mod tests {
             outcome["last_observation"]["hud"]["objective"],
             "All coins collected"
         );
+        let template = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist/futty-editor.exe");
+        let staging = root.join("Futty.exe");
+        fs::copy(template, staging).unwrap();
+        let built = server
+            .build_project(BuildProject {
+                path: manifest.into(),
+                output_path: "Windows".into(),
+                template_path: Some("Futty.exe".into()),
+            })
+            .unwrap()
+            .structured_content
+            .unwrap();
+        let exe = root.join(built["executable"].as_str().unwrap());
+        futty_build::validate_windows_template(&exe).unwrap();
+        assert!(root.join("Windows").join(futty_build::MANIFEST).is_file());
+    }
+
+    #[test]
+    #[ignore = "requires Python to generate the prototype asset pack"]
+    fn generated_prototype_assets_import_through_futty() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let generator = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/generate-prototype-assets.py");
+        let generated =
+            std::process::Command::new(if cfg!(windows) { "python" } else { "python3" })
+                .arg(generator)
+                .arg("--output")
+                .arg(root.join("AssetsGenerated"))
+                .args(["--seed", "42"])
+                .output()
+                .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join("AssetsGenerated/asset-manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let server = Futty::new(root.clone());
+        let path = "Prototype.futty.scene.ron";
+        let scene_path = root.join(path);
+        Scene::default().save_new(&scene_path).unwrap();
+        let entries = manifest["assets"].as_array().unwrap();
+        assert_eq!(entries.len(), 8);
+        for entry in entries {
+            let relative = entry["path"].as_str().unwrap();
+            let source = format!("AssetsGenerated/{relative}");
+            let result = server
+                .asset_import(Parameters(ImportAsset {
+                    path: path.into(),
+                    source: source.clone(),
+                }))
+                .unwrap_or_else(|error| panic!("{relative}: {}", error.message));
+            let result = result.structured_content.unwrap();
+            let id = result["asset"]["id"].as_str().unwrap();
+            let scene = Scene::load(&scene_path).unwrap();
+            let asset = scene
+                .assets
+                .iter()
+                .find(|asset| asset.id.to_string() == id)
+                .unwrap();
+            let bytes = futty_assets::read_saved(&scene_path, asset).unwrap();
+            assert_eq!(bytes, fs::read(root.join(source)).unwrap());
+            if asset.kind == AssetKind::Model {
+                let rig = futty_assets::model(&bytes).unwrap().rig.unwrap();
+                let clips: Vec<_> = rig.clips().iter().map(|clip| clip.name.as_str()).collect();
+                assert_eq!(clips, ["Idle", "Action"]);
+            }
+        }
+        let result = server
+            .scene_validate(Parameters(SceneFile { path: path.into() }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(result["valid"], true, "{result}");
     }
 
     #[test]

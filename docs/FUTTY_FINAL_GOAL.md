@@ -73,7 +73,7 @@
 | AI MCP | 씬 제작·검증·테스트·빌드 도구와 3D 코인 수집 프로젝트 템플릿 | 전체 제작 감독·추가 장르 템플릿·완전한 2D/멀티·생성기 API |
 | 검증 | scene_validate/project_validate, 고정 틱 play_test/replay, scene_capture | 씬 요청 후 다음 씬까지 이어지는 헤드리스 시뮬레이션 |
 | 빌드 | 준비된 Windows x64 실행 파일 기반 Game.exe 패키징 | 전용 서버 빌드, 2D·멀티 통합 릴리스 파이프라인 |
-| 프로토타입 에셋 | [Python 생성기](../scripts/generate-prototype-assets.py): PNG 4개, Idle/Action GLB 1개, WAV 3개, 매니페스트 | 생성기 출력의 Futty 실제 임포트·전체 게임 자동 연계 및 고품질 제작 |
+| 프로토타입 에셋 | [Python 생성기](../scripts/generate-prototype-assets.py)의 PNG 4개, Idle/Action GLB 1개, WAV 3개를 Futty에서 임포트·검증 | 전체 게임 자동 연계 및 고품질 제작 |
 
 **근거**: [MCP 실제 구현](../crates/futty-mcp/src/main.rs), [런타임](../crates/futty-runtime/src/lib.rs), [에셋 로더](../crates/futty-assets/src/lib.rs), [빌더](../crates/futty-build/src/lib.rs), [CI](../.github/workflows/ci.yml). 실제 배포·테스트 품질은 소스 존재만으로 보증되지 않는다.
 
@@ -293,9 +293,9 @@ Planned → Generated → Validated → Imported → Bound → Tested → Final
 
 ### 가까운 작업 큐(먼저 처리할 순서)
 
-- [ ] 기존 3D 예제 및 Windows 배포/씬 저장 회귀 테스트 고정.
-- [ ] AI가 3D 코인 수집 게임을 빈 폴더에서 생성·검증·빌드하는 전체 시나리오 작성.
-- [ ] Python 프로토타입 생성기 CI 테스트 결과 확인하고 Futty GLB/오디오 디코더 통합 시험.
+- [x] 기존 3D 씬 5개 저장·재로딩, Pulse Range 두 씬과 에셋이 포함된 Windows 패키지 검증. [회귀 테스트](../crates/futty-build/tests/legacy_examples.rs)
+- [x] 빈 폴더에서 3D 코인 수집 게임 생성·검증·패키징. 입력 없이 코인 0개를 확인하고, 이동 테스트에서 코인 3개와 승리 판정을 확인. [MCP 시나리오](guide.md#mcp-게임-템플릿)
+- [x] Python 생성기 출력 8개를 Futty에서 임포트하고 GLB의 Idle/Action 클립과 WAV 디코딩 검사. [CI](../.github/workflows/ci.yml)
 - [ ] UUID 유지 일괄 에셋 가져오기/바인딩 구현.
 - [ ] SceneDimension 기본 ThreeD 호환성을 갖춘 RON 형식 도입.
 - [ ] Sprite2D/2D 카메라 이미지 출력 및 Rapier2D 최소 충돌 예제.

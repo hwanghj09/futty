@@ -244,6 +244,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Cli
 
 이 입력을 `game_create_from_template`에 전달하면 새 폴더에 씬과 프로젝트 파일을 생성합니다. 기존 폴더의 내용은 보존됩니다. 반환된 `project_path`는 에디터에서 열거나 `project_build`에 전달하고, `playtest`는 그대로 `play_test`에 전달해 세 코인을 모으는지 확인할 수 있습니다. 직접 플레이할 때는 게임 화면을 클릭하고 기본 이동 키인 **WASD**를 사용합니다.
 
+에디터를 열지 않고 전체 흐름을 검증하려면 반환된 `project_path`로 `project_validate`를 먼저 실행합니다. `playtest.steps`를 `[{"ticks":120}]`으로 바꾼 대조 테스트에서는 코인 0개와 실패한 판정을 확인할 수 있습니다. 원래 `playtest`로 코인 3개와 승리를 확인한 뒤, 같은 프로젝트에 `project_build`를 호출하면 새 폴더에 `Game.exe`가 생성됩니다.
+
 ## MCP 프리팹과 씬 전환
 
 - `prefab_create`에 씬 `path`와 원본 `object_id`를 넘기면 오브젝트와 자식으로 프리팹을 만듭니다.

@@ -13,6 +13,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
+      - name: Verify generated PNG, animated GLB and WAV imports in Futty
+        run: cargo test --locked -p futty-mcp generated_prototype_assets_import_through_futty -- --ignored
       - run: cargo build --locked --workspace --release
       - name: Upload Windows editor
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

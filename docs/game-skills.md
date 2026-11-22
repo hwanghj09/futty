@@ -1,6 +1,6 @@
 # Futty 게임 스킬 카탈로그
 
-Futty에서 게임을 기획하고 제작하며 플레이로 검증할 때 쓸 AI 에이전트 스킬을 모았습니다. 공개 스킬의 원본과 적용 범위를 기록했고, 하단에 Futty에 기본 탑재할 후보와 필요한 엔진 기능을 정리했습니다. [AI 게임 엔진 로드맵](ai-roadmap.md)
+Futty에서 게임을 기획하고 제작하며 플레이로 검증할 때 쓸 AI 에이전트 스킬을 모았습니다. 공개 스킬의 원본과 적용 범위를 기록했고, 하단에 Futty에 기본 탑재할 후보와 필요한 엔진 기능을 정리했습니다. [Futty 최종 목표](FUTTY_FINAL_GOAL.md)
 
 ## 공개 스킬
 
@@ -44,9 +44,17 @@ Futty에서 게임을 기획하고 제작하며 플레이로 검증할 때 쓸 A
 - OpenAI Game Studio의 플러그인 메타데이터에는 MIT가 표시됩니다. 스킬 파일을 함께 배포할 때는 포함할 참조 문서, 스크립트, 에셋의 출처와 조건도 확인합니다. [Game Studio 플러그인 메타데이터](https://github.com/openai/plugins/blob/main/plugins/game-studio/.codex-plugin/plugin.json)
 - Unity Skills는 Unity 의존 프로젝트용 Companion License를 명시합니다. Futty에서는 위 스킬의 작업 흐름을 참고하고, Futty MCP와 런타임용 절차를 작성합니다. [Unity Skills LICENSE](https://github.com/Unity-Technologies/skills/blob/main/LICENSE.md)
 
+## AI 원스톱 게임 제작 스킬
+
+[**futty-one-shot-game**](../.agents/skills/futty-one-shot-game/SKILL.md)은 한 번의 요구사항에서 디자인→모델/스프라이트→애니메이션→사운드→씬 연결→테스트→빌드까지 안내하는 AI-first 제작 워크플로입니다. 현재 지원되는 기능과 [최종 목표와 에셋 생성 파이프라인](FUTTY_FINAL_GOAL.md)을 구분하며, 프로토타입 에셋 생성기를 사용할 수 있습니다.
+
+## 사용자의 게임 상상을 끌어내는 인터뷰 스킬
+
+**[futty-idea-interview](../.agents/skills/futty-idea-interview/SKILL.md)** — "FPS 게임 만들어줘" 같은 막연한 요청에는 바로 게임을 정하지 않고, 첫 장면과 감정·전투/진행 방식·핵심 재미·시각/음향·독창성·MVP를 선택형 질문과 적응형 심화 질문으로 탐색합니다. 답변에 따라 여러 라운드를 거쳐 **확정된 게임 브리프**를 만든 뒤 futty-game-design → futty-one-shot-game 순서로 전달합니다. [질문 분기표](../.agents/skills/futty-idea-interview/references/question-bank.md) · [대화 예시](../.agents/skills/futty-idea-interview/references/examples.md)
+
 ## Futty 기본 팩 후보
 
-[게임 기획](../.agents/skills/futty-game-design/SKILL.md), [씬 제작](../.agents/skills/futty-scene-authoring/SKILL.md), [Rhai 규칙](../.agents/skills/futty-rhai-gameplay/SKILL.md), [AI 플레이](../.agents/skills/futty-ai-player/SKILL.md)는 저장소의 `.agents/skills/`에 들어 있습니다. [Beacon Bot Escape](../examples/agent-escape/Beacon%20Bot%20Escape.futty.scene.ron)에서 씬 제작부터 AI 탈출까지 실행할 수 있습니다.
+[아이디어 인터뷰](../.agents/skills/futty-idea-interview/SKILL.md), [게임 기획](../.agents/skills/futty-game-design/SKILL.md), [씬 제작](../.agents/skills/futty-scene-authoring/SKILL.md), [Rhai 규칙](../.agents/skills/futty-rhai-gameplay/SKILL.md), [AI 플레이](../.agents/skills/futty-ai-player/SKILL.md)는 저장소의 `.agents/skills/`에 들어 있습니다. [Beacon Bot Escape](../examples/agent-escape/Beacon%20Bot%20Escape.futty.scene.ron)에서 씬 제작부터 AI 탈출까지 실행할 수 있습니다.
 
 [자동 플레이테스트](../.agents/skills/futty-playtest/SKILL.md)와 [리플레이 디버깅](../.agents/skills/futty-replay-debug/SKILL.md)은 탈출 판정과 첫 상태 차이를 확인하는 후속 작업에 사용합니다.
 
@@ -79,8 +87,9 @@ ABA Games의 공개 스킬을 참고해 Futty 도구로 실행할 수 있는 지
 
 ## 탑재 순서
 
-1. **제작** — `futty-game-design`, `futty-scene-authoring`, `futty-rhai-gameplay`로 Beacon Bot 방과 스위치·출구 규칙을 만듭니다.
-2. **플레이** — `futty-ai-player`, `futty-playtest`, `futty-replay-debug`로 탈출 성공 여부를 기록하고 실패를 재현합니다.
-3. **표현과 배포** — GLB, 스프라이트, HUD, 오디오, 애니메이션과 Windows 빌드 스킬을 추가합니다. 이후 길찾기와 밸런스 비교를 붙입니다.
+1. **구상·인터뷰** — 막연한 게임 요청부터 [futty-idea-interview](../.agents/skills/futty-idea-interview/SKILL.md)로 여러 차례 핵심 질문을 진행해 사용자 비전을 확정합니다.
+2. **제작** — `futty-game-design`, `futty-scene-authoring`, `futty-rhai-gameplay`로 Beacon Bot 방과 스위치·출구 규칙을 만듭니다.
+3. **플레이** — `futty-ai-player`, `futty-playtest`, `futty-replay-debug`로 탈출 성공 여부를 기록하고 실패를 재현합니다.
+4. **표현과 배포** — GLB, 스프라이트, HUD, 오디오, 애니메이션과 Windows 빌드 스킬을 추가합니다. 이후 길찾기와 밸런스 비교를 붙입니다.
 
 팩에 추가할 때는 작업별로 `SKILL.md`에 이름, 호출 조건, 입력, 사용 도구, 결과물을 적습니다. 씬 예제와 검증 시나리오는 해당 스킬의 참조 파일로 연결합니다. [Agent Skills 규격](https://agentskills.io/specification)

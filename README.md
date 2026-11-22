@@ -1,5 +1,7 @@
 # Futty
 
+**[Futty 최종 목표 · 통합 개발 로드맵](docs/FUTTY_FINAL_GOAL.md)** — AI가 기획부터 2D/3D, 멀티플레이, 디자인·모델링·애니메이션·사운드, 테스트와 배포까지 담당하는 엔진의 제품 기준 문서.
+
 Futty는 **AI 에이전트가 MCP로 3D 게임을 만들고 검증할 수 있도록 설계된 Rust 게임 엔진**입니다. 사람은 Windows 에디터에서 씬을 직접 편집하고, 예제 게임을 플레이하고, 실행 파일을 내보낼 수 있습니다.
 
 [![Windows CI](https://github.com/hwanghj09/futty/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hwanghj09/futty/actions/workflows/ci.yml)
@@ -9,6 +11,10 @@ Futty는 **AI 에이전트가 MCP로 3D 게임을 만들고 검증할 수 있도
 **[Windows x64 에디터 EXE 다운로드](https://github.com/hwanghj09/futty/raw/refs/heads/main/dist/futty-editor.exe)** · 다운로드한 `futty-editor.exe`를 더블클릭하면 에디터가 열립니다.
 
 ![Futty Editor에서 Pulse Range를 연 화면. 왼쪽에 오브젝트 계층과 1인칭 미리보기, 오른쪽에 3D 뷰포트와 카메라 속성이 보입니다.](docs/images/futty-editor.jpg)
+
+## 게임 아이디어부터 시작하기
+
+**[futty-idea-interview 스킬](.agents/skills/futty-idea-interview/SKILL.md)**은 "FPS 게임 만들어줘"처럼 아이디어가 아직 모호할 때 사용자의 머릿속 게임을 단계별 질문으로 구체화합니다. 참조 게임의 플레이 감각, 첫 장면, 핵심 재미, 전투·맵·비주얼·사운드 등에서 선택지와 후속 질문을 제공하며, 확정된 답은 [게임 기획 스킬](.agents/skills/futty-game-design/SKILL.md) 및 [원스톱 제작 스킬](.agents/skills/futty-one-shot-game/SKILL.md)로 연결합니다. 질문은 사용자가 충분히 답하거나 바로 제작해 달라고 할 때 중지합니다.
 
 ## 사람용 시작 안내
 
@@ -120,7 +126,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1
 
 이후 [Beacon Bot Escape 플레이테스트 입력](examples/agent-escape/playtest.json)을 그대로 `play_test`에 전달하면 스위치를 켜고 출구를 통과하는 경로를 검증할 수 있습니다.
 
-[도구별 입력 예제](docs/guide.md#codex에서-futty-mcp-사용하기) · [저장소에 포함된 에이전트 스킬](docs/game-skills.md) · [AI-first 로드맵](docs/ai-roadmap.md)
+[도구별 입력 예제](docs/guide.md#codex에서-futty-mcp-사용하기) · [저장소에 포함된 에이전트 스킬](docs/game-skills.md) · **[Futty 최종 목표](docs/FUTTY_FINAL_GOAL.md)**
 
 ## 주요 기능
 
@@ -137,8 +143,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1
 
 - [에디터와 MCP 사용 가이드](docs/guide.md)
 - [게임 제작 및 검증 스킬](docs/game-skills.md)
-- [AI-first 개발 로드맵](docs/ai-roadmap.md)
-- [현재 구현과 다음 개발 순서](docs/development-checklist.md)
+- **[Futty 최종 목표 및 통합 개발 명세](docs/FUTTY_FINAL_GOAL.md)** — AI-first · 2D/3D · 멀티플레이 · 디자인/모델링/애니메이션/사운드 · 개발 순서
+- [프로토타입 에셋 생성기](scripts/generate-prototype-assets.py)
 
 ## 저장소 구조
 

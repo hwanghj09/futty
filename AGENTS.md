@@ -1,5 +1,11 @@
 # Futty
 
+제품 비전, 구현 우선순위, 실제 구현과 계획의 구분은 [최종 목표·통합 로드맵](docs/FUTTY_FINAL_GOAL.md)을 기준으로 합니다. AI-first 제작 시 GUI는 필수 단계가 아닙니다.
+
+## 게임 기획/아이디어 인터뷰 (AI-first)
+
+사용자가 게임 아이디어 구상·컨셉·기획을 요청하거나 "FPS 게임 만들어"처럼 원하는 게임이 불분명하면 **[futty-idea-interview](.agents/skills/futty-idea-interview/SKILL.md)를 우선 적용**합니다. 먼저 사용자가 상상한 장면/감정/플레이 방식에 관한 선택지와 심화 질문을 여러 차례 진행하고, 합의한 Game Brief를 [게임 기획 스킬](.agents/skills/futty-game-design/SKILL.md)과 [원스톱 제작 스킬](.agents/skills/futty-one-shot-game/SKILL.md)로 전달합니다. 이미 구체적이거나 바로 구현을 명시한 요청에 억지로 질문을 늘리지 않습니다. 사용자가 "더 물어봐"라고 하면 대화를 이어갑니다.
+
 ## MCP 연결
 
 사용자가 “MCP 연결해줘” 또는 “Futty MCP 연결해줘”라고 하면 이 저장소 루트에서 아래 명령을 직접 실행합니다. Git 클론과 GitHub ZIP에서 똑같이 실행할 수 있습니다.

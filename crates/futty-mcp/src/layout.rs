@@ -13,18 +13,18 @@ use crate::authoring::invalid;
 #[serde(deny_unknown_fields)]
 pub(crate) struct Tilemap2d {
     #[schemars(with = "String")]
-    texture_id: Uuid,
+    pub texture_id: Uuid,
     /// Number of atlas columns and rows.
-    atlas: [u16; 2],
+    pub atlas: [u16; 2],
     /// Cell indices, counting from zero; null is empty. Rows run from top to bottom.
-    rows: Vec<Vec<Option<u16>>>,
+    pub rows: Vec<Vec<Option<u16>>>,
     /// Atlas indices that create fixed colliders.
     #[serde(default)]
-    solid: Vec<u16>,
+    pub solid: Vec<u16>,
     /// Center of the top-left cell. Defaults to [0, 0, 0].
-    origin: Option<[f32; 3]>,
+    pub origin: Option<[f32; 3]>,
     /// Width and height of a cell, defaulting to 1 world unit.
-    tile_size: Option<f32>,
+    pub tile_size: Option<f32>,
 }
 
 impl Tilemap2d {
@@ -89,6 +89,8 @@ impl Tilemap2d {
                     texture: self.texture_id,
                     size: Vec2::splat(tile_size),
                     billboard: Billboard::Fixed,
+                    planar: (scene.dimension == futty_runtime::SceneDimension::TwoD)
+                        .then(futty_runtime::Sprite2d::default),
                     sheet: Some(SpriteSheet {
                         columns,
                         rows,
@@ -150,13 +152,13 @@ mod tests {
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Maze2d {
-    seed: u32,
+    pub seed: u32,
     /// Number of rooms along X and Y, each between 2 and 8.
-    rooms: [u8; 2],
+    pub rooms: [u8; 2],
     /// Width of a room, passage or wall cell in world units, from 3 to 12.
-    cell_size: Option<f32>,
+    pub cell_size: Option<f32>,
     /// World position of the player start. Defaults to [0, 0, 0].
-    origin: Option<[f32; 3]>,
+    pub origin: Option<[f32; 3]>,
 }
 
 impl Maze2d {

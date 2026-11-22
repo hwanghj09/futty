@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn side_scroller_accepts_early_and_late_presses_once() {
-        let mut physics = Physics::new();
+        let mut physics = Physics::new(crate::SceneDimension::TwoD);
         physics.insert(
             Uuid::new_v4(),
             Transform {
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn capsule_lands_jumps_and_stops_at_the_wall_queried_by_layer() {
-        let mut physics = Physics::new();
+        let mut physics = Physics::new(crate::SceneDimension::ThreeD);
         let floor = Body {
             motion: Motion::Fixed,
             size: Vec3::new(18.0, 0.5, 18.0),

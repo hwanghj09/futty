@@ -66,7 +66,7 @@
 | 3D 렌더링 | wgpu/WGSL, 3D 씬, 카메라, 조명·그림자, PNG 캡처 | 전문적인 AAA 렌더링 전체 |
 | 게임 런타임 | bevy_ecs 기반 ECS, Rapier3D, Rhai, 입력·HUD·씬 전환 | 2D 전용 물리/완전한 다중 씬 헤드리스 실행 |
 | 3D 에셋 | GLB 메시·텍스처·스켈레톤/애니메이션, 재가져오기, 공유 재질 | 자연어만으로 모델/리그/모션을 고품질 자동 생성 |
-| 2D 에셋 | PNG·Sprite3D·시트 애니메이션, MCP 타일 배치·시드 기반 미로, 직교 카메라 추적·경계, 탑다운·횡스크롤 이동 및 점프 보정 | 전용 Sprite2D·TileMap·Rapier2D |
+| 2D 에셋·물리 | Sprite2D 레이어·기준점·뒤집기, PNG·시트 애니메이션, MCP 타일 배치·미로, 직교 카메라 캡처, Rapier2D 박스와 캐릭터 캡슐 충돌 | 전용 TileMap 청크·2D 원형 강체·이동 플랫폼 통합 검증 |
 | 로컬 협동 | 공유 화면 키보드 2인 플레이, 개별 상호작용·체력바 | 전용 서버·온라인 연결·상태 복제 |
 | 오디오 | WAV/Ogg 디코딩·재생 및 이벤트 | 음악/효과음 AI 생성, 완전한 믹서·루프 품질 검증 |
 | 프로젝트/에디터 | 씬·프리팹·HUD·Rhai·멀티 씬 프로젝트·Windows 내보내기 | 사람이 GUI를 쓰지 않는 전 영역 제작 E2E |
@@ -165,8 +165,8 @@ Futty MCP / CLI / 안정적인 JSON 계약
 - [ ] Rapier2D의 박스·원·캡슐 강체/콜라이더·센서·레이캐스트.
 - [ ] 2D 중력·점프·탑다운 이동·충돌 레이어와 스크립트 이벤트.
 - [ ] Rhai 스크립트/입력/HUD/프리팹/오디오를 3D와 재사용.
-- [ ] 2D 플랫폼/탑다운 프로젝트 템플릿과 자동 생성/테스트.
-- [ ] 2D Coin Runner(이동→점프→코인→점수→승리) 자동 E2E.
+- [x] 플랫폼 `coin_runner_2d`와 탑다운 `power_maze_2d` 프로젝트를 MCP로 생성·검증. Power Maze는 전원 없는 출구와 전원 획득 후 탈출을 테스트하고 Windows 패키지 실행을 확인. [2D Power Maze](guide.md#2d-power-maze)
+- [x] `coin_runner_2d` 템플릿으로 이동→점프→코인 세 개→점수 HUD→승리를 자동 검증. 점프 없는 추락 경로도 검증하고 직교 캡처·Windows 패키지 실행 확인. [MCP 템플릿](guide.md#2d-coin-runner)
 
 **2D 완료 조건**: AI가 GUI 없이 새 프로젝트에 2D 맵·캐릭터·애니메이션·UI·물리·게임 규칙을 만들고 테스트한 다음 Windows 게임으로 빌드한다.
 
@@ -296,10 +296,10 @@ Planned → Generated → Validated → Imported → Bound → Tested → Final
 - [x] 기존 3D 씬 5개 저장·재로딩, Pulse Range 두 씬과 에셋이 포함된 Windows 패키지 검증. [회귀 테스트](../crates/futty-build/tests/legacy_examples.rs)
 - [x] 빈 폴더에서 3D 코인 수집 게임 생성·검증·패키징. 입력 없이 코인 0개를 확인하고, 이동 테스트에서 코인 3개와 승리 판정을 확인. [MCP 시나리오](guide.md#mcp-게임-템플릿)
 - [x] Python 생성기 출력 8개를 Futty에서 임포트하고 GLB의 Idle/Action 클립과 WAV 디코딩 검사. [CI](../.github/workflows/ci.yml)
-- [ ] UUID 유지 일괄 에셋 가져오기/바인딩 구현.
-- [ ] SceneDimension 기본 ThreeD 호환성을 갖춘 RON 형식 도입.
-- [ ] Sprite2D/2D 카메라 이미지 출력 및 Rapier2D 최소 충돌 예제.
-- [ ] 게임 제작 실패 리포트의 표준 JSON 계약 정의.
+- [x] `asset_import_batch`로 한 씬에서 UUID를 유지해 에셋을 일괄 교체하고 오브젝트·스프라이트·공유 재질·HUD 이미지에 바인딩. [사용 가이드](guide.md#일괄-가져오기와-바인딩)
+- [x] RON에 `SceneDimension`을 도입하고 필드가 없는 기존 씬은 `ThreeD`로 로드. 에디터와 MCP에서 직교 카메라를 갖춘 새 `TwoD` 씬 생성. [2D 씬 가이드](guide.md#2d-씬-구성하기)
+- [x] Sprite2D와 직교 PNG 캡처 및 Rapier2D XY 충돌 예제. [Planar Collision](../examples/planar-collision/)
+- [x] 씬·프로젝트 검증, 플레이테스트, 카메라 캡처, Windows 패키징에 버전이 있는 실패 리포트 적용. [JSON 계약](failure-report.md)
 - [ ] 원스톱/2D/멀티플레이 기능은 증거(테스트+실행 파일)가 생길 때만 체크박스 완료로 변경.
 
 ## 9. 자동 검증·성공 지표

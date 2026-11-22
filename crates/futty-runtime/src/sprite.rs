@@ -48,6 +48,7 @@ mod tests {
             size: Vec2::new(2.0, 1.0),
             billboard: Billboard::FaceCamera,
             sheet: None,
+            planar: None,
         };
         let screen_facing = sprite.matrix(world, camera.view());
         assert_eq!(screen_facing.w_axis.truncate(), center);
@@ -90,6 +91,27 @@ pub struct Sprite {
     pub billboard: Billboard,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheet: Option<SpriteSheet>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planar: Option<Sprite2d>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Sprite2d {
+    pub layer: i16,
+    /// Normalized pivot measured from the top-left of the sprite.
+    pub pivot: [f32; 2],
+    pub flip: [bool; 2],
+}
+
+impl Default for Sprite2d {
+    fn default() -> Self {
+        Self {
+            layer: 0,
+            pivot: [0.5, 0.5],
+            flip: [false; 2],
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -137,6 +159,12 @@ impl Sprite {
     pub const BOUNDS: [Vec3; 2] = [Vec3::new(-0.5, -0.5, 0.0), Vec3::new(0.5, 0.5, 0.0)];
 
     pub fn matrix(self, world: Mat4, camera: CameraView) -> Mat4 {
+        if let Some(planar) = self.planar {
+            let [x, y] = planar.pivot;
+            return world
+                * Mat4::from_scale(self.size.extend(1.0))
+                * Mat4::from_translation(Vec3::new(0.5 - x, y - 0.5, 0.0));
+        }
         if self.billboard == Billboard::Fixed {
             return world * Mat4::from_scale(self.size.extend(1.0));
         }
@@ -166,5 +194,11 @@ impl Sprite {
             && self.size.min_element() >= 0.01
             && self.size.max_element() <= 1000.0
             && self.sheet.is_none_or(SpriteSheet::valid)
+            && self.planar.is_none_or(|sprite| {
+                sprite
+                    .pivot
+                    .into_iter()
+                    .all(|axis| (0.0..=1.0).contains(&axis))
+            })
     }
 }

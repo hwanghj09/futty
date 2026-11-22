@@ -192,6 +192,16 @@ enum Operation {
         /// Omit or use null to show the entire texture.
         sheet: Option<SpriteSheetSettings>,
     },
+    /// Set a PNG sprite on the XY plane with explicit layer, pivot and flip settings.
+    SetSprite2d {
+        object: String,
+        #[schemars(with = "String")]
+        texture_id: Uuid,
+        size: Option<[f32; 2]>,
+        layer: Option<i16>,
+        pivot: Option<[f32; 2]>,
+        flip: Option<[bool; 2]>,
+    },
     SetCameraFollow {
         object: String,
         /// Target scene tag. Omit or use null to disable following.
@@ -466,37 +476,7 @@ fn apply_edit(
                 .find(|asset| asset.id == asset_id)
                 .ok_or_else(|| invalid(format!("Unknown asset {asset_id}")))?
                 .kind;
-            let object = &mut scene.entities[index];
-            match kind {
-                AssetKind::Model if object.has_renderer() && object.sprite.is_none() => {
-                    if object.mesh != Some(asset_id) {
-                        object.mesh = Some(asset_id);
-                        object.animation = None;
-                    }
-                }
-                AssetKind::Texture if object.has_renderer() => {
-                    if let Some(sprite) = &mut object.sprite {
-                        sprite.texture = asset_id;
-                    } else {
-                        object.texture = Some(asset_id);
-                    }
-                }
-                AssetKind::Script => {
-                    crate::scripts::assign(object, Some(asset_id));
-                }
-                AssetKind::Wav | AssetKind::Ogg if object.prefab.is_none() => {
-                    let mut source = object
-                        .audio_source
-                        .unwrap_or_else(|| futty_runtime::AudioSource::new(asset_id));
-                    source.clip = asset_id;
-                    object.audio_source = Some(source);
-                }
-                _ => {
-                    return Err(invalid(
-                        "This object does not accept the selected asset kind",
-                    ));
-                }
-            }
+            attach_asset(&mut scene.entities[index], asset_id, kind)?;
         }
         Operation::SetMaterial {
             object,
@@ -528,28 +508,7 @@ fn apply_edit(
             {
                 return Err(invalid("Sprite3D requires a registered PNG texture"));
             }
-            let object = &mut scene.entities[index];
-            if !object.has_renderer()
-                || object.mesh.is_some()
-                || object.material.is_some()
-                || object.prefab.is_some()
-            {
-                return Err(invalid(
-                    "Choose a primitive object or the source of an existing Sprite3D",
-                ));
-            }
-            let current = object.sprite.unwrap_or(futty_runtime::Sprite {
-                texture: texture_id,
-                size: Vec2::ONE,
-                billboard: futty_runtime::Billboard::Fixed,
-                sheet: None,
-            });
-            object.sprite = Some(futty_runtime::Sprite {
-                texture: texture_id,
-                size: size.map_or(current.size, Into::into),
-                billboard: billboard.unwrap_or(current.billboard),
-                sheet: current.sheet,
-            });
+            set_sprite(&mut scene.entities[index], texture_id, size, billboard)?;
         }
         Operation::SetSpriteSheet { object, sheet } => {
             let index = object_index(&object, scene, keys)?;
@@ -569,6 +528,39 @@ fn apply_edit(
                 fps: sheet.fps,
                 looping: sheet.looping,
             });
+        }
+        Operation::SetSprite2d {
+            object,
+            texture_id,
+            size,
+            layer,
+            pivot,
+            flip,
+        } => {
+            let index = object_index(&object, scene, keys)?;
+            if !scene
+                .assets
+                .iter()
+                .any(|asset| asset.id == texture_id && asset.kind == AssetKind::Texture)
+            {
+                return Err(invalid("Sprite2D requires a registered PNG texture"));
+            }
+            let object = &mut scene.entities[index];
+            set_sprite(
+                object,
+                texture_id,
+                size,
+                Some(futty_runtime::Billboard::Fixed),
+            )?;
+            let planar = object
+                .sprite
+                .as_mut()
+                .unwrap()
+                .planar
+                .get_or_insert_with(Default::default);
+            planar.layer = layer.unwrap_or(planar.layer);
+            planar.pivot = pivot.unwrap_or(planar.pivot);
+            planar.flip = flip.unwrap_or(planar.flip);
         }
         Operation::SetCameraFollow {
             object,
@@ -637,7 +629,79 @@ fn apply_edit(
     Ok(())
 }
 
-fn register(keys: &mut BTreeMap<String, Uuid>, key: String, id: Uuid) -> Result<(), ErrorData> {
+pub(crate) fn attach_asset(
+    object: &mut Object,
+    asset_id: Uuid,
+    kind: AssetKind,
+) -> Result<(), ErrorData> {
+    match kind {
+        AssetKind::Model if object.has_renderer() && object.sprite.is_none() => {
+            if object.mesh != Some(asset_id) {
+                object.mesh = Some(asset_id);
+                object.animation = None;
+            }
+        }
+        AssetKind::Texture if object.has_renderer() => {
+            if let Some(sprite) = &mut object.sprite {
+                sprite.texture = asset_id;
+            } else {
+                object.texture = Some(asset_id);
+            }
+        }
+        AssetKind::Script => crate::scripts::assign(object, Some(asset_id)),
+        AssetKind::Wav | AssetKind::Ogg if object.prefab.is_none() => {
+            let mut source = object
+                .audio_source
+                .unwrap_or_else(|| futty_runtime::AudioSource::new(asset_id));
+            source.clip = asset_id;
+            object.audio_source = Some(source);
+        }
+        _ => {
+            return Err(invalid(
+                "This object does not accept the selected asset kind",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn set_sprite(
+    object: &mut Object,
+    texture_id: Uuid,
+    size: Option<[f32; 2]>,
+    billboard: Option<futty_runtime::Billboard>,
+) -> Result<(), ErrorData> {
+    if !object.has_renderer()
+        || object.mesh.is_some()
+        || object.material.is_some()
+        || object.prefab.is_some()
+    {
+        return Err(invalid(
+            "Choose a primitive object or the source of an existing Sprite3D",
+        ));
+    }
+    let current = object.sprite.unwrap_or(futty_runtime::Sprite {
+        texture: texture_id,
+        size: Vec2::ONE,
+        billboard: futty_runtime::Billboard::Fixed,
+        sheet: None,
+        planar: None,
+    });
+    object.sprite = Some(futty_runtime::Sprite {
+        texture: texture_id,
+        size: size.map_or(current.size, Into::into),
+        billboard: billboard.unwrap_or(current.billboard),
+        sheet: current.sheet,
+        planar: current.planar,
+    });
+    Ok(())
+}
+
+pub(crate) fn register(
+    keys: &mut BTreeMap<String, Uuid>,
+    key: String,
+    id: Uuid,
+) -> Result<(), ErrorData> {
     if key.is_empty()
         || key.len() > 40
         || !key

@@ -6,6 +6,7 @@ mod interface;
 mod layout;
 mod play;
 mod replay;
+mod report;
 mod scripts;
 mod templates;
 
@@ -16,18 +17,19 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use assets::{CreateMaterial, ImportAsset, ReimportAsset, UpdateMaterial};
+use assets::{CreateMaterial, ImportAsset, ImportAssetBatch, ReimportAsset, UpdateMaterial};
 use authoring::{Batch, ObjectQuery, Undo, UndoRecord, invalid};
 use components::ComponentQuery;
-use futty_core::{Asset, AssetKind, Camera, CameraLens};
+use futty_core::{AssetKind, Camera, CameraLens};
 use futty_runtime::{
-    HudWidget, InputAction, InputProfile, Material, Object, Scene, SceneIssue,
+    HudWidget, InputAction, InputProfile, Material, Object, Scene, SceneDimension, SceneIssue,
     project::{Project, SceneList, is_project},
 };
 use glam::Vec3;
 use interface::{BindHud, CreateHud, SetInput, UpdateHud};
 use play::{PlayRunner, SessionId, Start, Step};
 use replay::{PlayTest, Replay, ReplayFile, SaveReplay};
+use report::{Context as ReportContext, Stage};
 use rmcp::{
     ErrorData, ServerHandler, ServiceExt,
     handler::server::wrapper::Parameters,
@@ -60,6 +62,14 @@ struct NewScene {
     /// New .ron scene path relative to the workspace. Its parent directory must exist.
     path: String,
     name: String,
+    /// ThreeD creates the usual cube and sky. TwoD starts with an XY orthographic camera.
+    #[serde(default)]
+    #[schemars(schema_with = "scene_dimension_schema")]
+    dimension: SceneDimension,
+}
+
+fn scene_dimension_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": "string", "enum": ["TwoD", "ThreeD"] })
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -191,18 +201,30 @@ impl ServerHandler for Futty {
 #[tool_router]
 impl Futty {
     #[tool(
+        description = "Return the JSON Schema for Futty game production failure reports.",
+        annotations(read_only_hint = true)
+    )]
+    fn game_failure_schema(&self) -> CallToolResult {
+        report::schema()
+    }
+
+    #[tool(
         description = "Render a saved scene from a camera into a new PNG using a graphics adapter."
     )]
     async fn scene_capture(
         &self,
         Parameters(input): Parameters<capture::Capture>,
     ) -> Result<CallToolResult, ErrorData> {
-        let path = self.scene_path(&input.path, true)?;
-        let output = self.workspace_file(&input.output_path, "png", false)?;
-        tokio::task::spawn_blocking(move || {
-            let ([width, height], camera_id) = capture::save(&path, &output, &input)?;
-            Ok(CallToolResult::structured(json!({"output_path": input.output_path, "camera_id":camera_id,"width":width,"height":height})))
-        }).await.map_err(io_error)?
+        let mut context = ReportContext::new(&input.path);
+        context.output_path = Some(input.output_path.clone());
+        async {
+            let path = self.scene_path(&input.path, true)?;
+            let output = self.workspace_file(&input.output_path, "png", false)?;
+            tokio::task::spawn_blocking(move || {
+                let ([width, height], camera_id) = capture::save(&path, &output, &input)?;
+                Ok(CallToolResult::structured(json!({"output_path": input.output_path, "camera_id":camera_id,"width":width,"height":height})))
+            }).await.map_err(io_error)?
+        }.await.map_err(|error| report::execution(error, Stage::CameraCapture, context))
     }
 
     #[tool(description = "Create a prefab from an object and its descendants in a saved scene.")]
@@ -316,13 +338,18 @@ impl Futty {
         &self,
         Parameters(input): Parameters<PlayTest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let path = self.scene_path(&input.path, true)?;
-        let replay = input
-            .replay_path
-            .as_deref()
-            .map(|path| self.workspace_file(path, "json", false))
-            .transpose()?;
-        self.play.test(path, input, replay)
+        let mut context = ReportContext::new(&input.path);
+        context.seed = Some(input.seed);
+        let run = || {
+            let path = self.scene_path(&input.path, true)?;
+            let replay = input
+                .replay_path
+                .as_deref()
+                .map(|path| self.workspace_file(path, "json", false))
+                .transpose()?;
+            self.play.test(path, input, replay)
+        };
+        run().map_err(|error| report::execution(error, Stage::Playtest, context))
     }
 
     #[tool(
@@ -390,14 +417,14 @@ impl Futty {
     }
 
     #[tool(
-        description = "Create a new Futty scene with the default cube and sky. Refuses to overwrite an existing file."
+        description = "Create a new Futty scene. Defaults to ThreeD with a cube and sky. TwoD starts with an orthographic XY camera. Refuses to overwrite an existing file."
     )]
     fn scene_create(
         &self,
         Parameters(input): Parameters<NewScene>,
     ) -> Result<CallToolResult, ErrorData> {
         let path = self.scene_path(&input.path, false)?;
-        let mut scene = Scene::default();
+        let mut scene = Scene::new(input.dimension);
         scene.name = input.name;
         scene.save_new(&path).map_err(io_error)?;
         Ok(scene_info(&scene))
@@ -424,11 +451,24 @@ impl Futty {
         &self,
         Parameters(input): Parameters<SceneFile>,
     ) -> Result<CallToolResult, ErrorData> {
-        let path = self.scene_path(&input.path, true)?;
+        let path = self.scene_path(&input.path, true).map_err(|error| {
+            report::execution(
+                error,
+                Stage::SceneValidation,
+                ReportContext::new(&input.path),
+            )
+        })?;
         let issues = scene_issues(&path);
-        Ok(CallToolResult::structured(json!({
+        let result = json!({
             "path": input.path, "valid": issues.is_empty(), "issues": issues,
-        })))
+        });
+        Ok(report::validation(
+            result,
+            Stage::SceneValidation,
+            &input.path,
+            issues,
+            vec![],
+        ))
     }
 
     #[tool(
@@ -452,11 +492,15 @@ impl Futty {
         annotations(read_only_hint = true)
     )]
     fn project_template_list(&self) -> CallToolResult {
-        CallToolResult::structured(json!({"templates":[{
-            "id":templates::COIN_COLLECTION,
-            "name":"Coin Collection",
-            "description":"First-person collection game with three coins, a score HUD, and a success condition.",
-        }]}))
+        let templates: Vec<_> = templates::TEMPLATES
+            .iter()
+            .map(|template| {
+                json!({
+                    "id":template.id, "name":template.name, "description":template.description,
+                })
+            })
+            .collect();
+        CallToolResult::structured(json!({"templates":templates}))
     }
 
     #[tool(
@@ -468,18 +512,27 @@ impl Futty {
     ) -> Result<CallToolResult, ErrorData> {
         let _lock = self.lock_edits().map_err(io_error)?;
         let output = self.workspace_path(&input.output_path, false)?;
-        templates::create(&input.template, &output)?;
+        let template = templates::create(&input.template, &output)?;
         let folder = input.output_path.trim_end_matches(['/', '\\']);
-        let scene = format!("{folder}/{}", templates::SCENE_FILE);
+        let scene = format!("{folder}/{}", template.scene_file());
+        let steps: Vec<_> = template
+            .steps
+            .iter()
+            .map(|(actions, ticks)| {
+                json!({
+                    "actions":actions, "ticks":ticks,
+                })
+            })
+            .collect();
         Ok(CallToolResult::structured(json!({
             "template":input.template,
-            "project_path":format!("{folder}/{}", templates::PROJECT_FILE),
+            "project_path":format!("{folder}/{}", template.project_file()),
             "scene_path":scene,
             "playtest":{
                 "path":scene,
-                "steps":[{"actions":["forward"],"ticks":120}],
+                "steps":steps,
                 "expect":"success",
-                "expect_hud":{"coins":3},
+                "expect_hud":{(template.hud_expectation.0):template.hud_expectation.1},
             },
         })))
     }
@@ -505,14 +558,28 @@ impl Futty {
         &self,
         Parameters(input): Parameters<ProjectFile>,
     ) -> Result<CallToolResult, ErrorData> {
-        let path = self.project_path(&input.path, true)?;
+        let path = self.project_path(&input.path, true).map_err(|error| {
+            report::execution(
+                error,
+                Stage::ProjectValidation,
+                ReportContext::new(&input.path),
+            )
+        })?;
         let project = match Project::load(&path) {
             Ok(project) => project,
             Err(error) => {
-                return Ok(CallToolResult::structured(json!({
+                let issues = vec![json!({"field": "manifest", "message": error.to_string()})];
+                let result = json!({
                     "path": input.path, "valid": false, "scenes": [],
-                    "issues": [{"field": "manifest", "message": error.to_string()}],
-                })));
+                    "issues": issues,
+                });
+                return Ok(report::validation(
+                    result,
+                    Stage::ProjectValidation,
+                    &input.path,
+                    issues,
+                    vec![],
+                ));
             }
         };
         let scenes: Vec<_> = project
@@ -527,10 +594,22 @@ impl Futty {
                 json!({"scene_id":id,"path":relative,"valid":issues.is_empty(),"issues":issues})
             })
             .collect();
-        Ok(CallToolResult::structured(json!({
+        let invalid_scenes: Vec<_> = scenes
+            .iter()
+            .filter(|scene| scene["valid"] == false)
+            .cloned()
+            .collect();
+        let result = json!({
             "path": input.path, "start":project.list().start, "issues": [],
-            "valid": scenes.iter().all(|scene| scene["valid"] == true), "scenes": scenes,
-        })))
+            "valid": invalid_scenes.is_empty(), "scenes": scenes,
+        });
+        Ok(report::validation(
+            result,
+            Stage::ProjectValidation,
+            &input.path,
+            vec![],
+            invalid_scenes,
+        ))
     }
 
     #[tool(
@@ -541,9 +620,13 @@ impl Futty {
         Parameters(input): Parameters<BuildProject>,
     ) -> Result<CallToolResult, ErrorData> {
         let server = self.clone();
+        let mut context = ReportContext::new(&input.path);
+        context.output_path = Some(input.output_path.clone());
         tokio::task::spawn_blocking(move || server.build_project(input))
             .await
-            .map_err(io_error)?
+            .map_err(io_error)
+            .and_then(|result| result)
+            .map_err(|error| report::execution(error, Stage::WindowsBuild, context))
     }
 
     #[tool(
@@ -599,15 +682,7 @@ impl Futty {
         let path = self.scene_path(&input.path, true)?;
         let mut scene = Scene::load(&path).map_err(io_error)?;
         let (source, kind) = self.asset_source(&input.source)?;
-        let asset = Asset {
-            id: Uuid::new_v4(),
-            name: Path::new(&input.source)
-                .file_stem()
-                .and_then(|name| name.to_str())
-                .unwrap_or("Asset")
-                .into(),
-            kind,
-        };
+        let asset = assets::new_asset(&input.source, kind);
         let bytes = futty_assets::read(&source).map_err(io_error)?;
         assets::validate_asset(&scene, &asset, &bytes)?;
         let saved = futty_assets::save_new(&path, &asset, &bytes).map_err(io_error)?;
@@ -621,6 +696,16 @@ impl Futty {
             return Err(io_error(error));
         }
         Ok(CallToolResult::structured(json!({"asset":asset})))
+    }
+
+    #[tool(
+        description = "Import or replace up to 32 assets in a saved scene, preserving registered UUIDs and optionally binding them to objects, sprites, shared materials, or HUD images."
+    )]
+    fn asset_import_batch(
+        &self,
+        Parameters(input): Parameters<ImportAssetBatch>,
+    ) -> Result<CallToolResult, ErrorData> {
+        assets::import_batch(self, input)
     }
 
     #[tool(
@@ -644,17 +729,7 @@ impl Futty {
                 "The replacement must match the registered asset kind",
             ));
         }
-        let expected = match futty_assets::read_saved(&path, asset) {
-            Ok(bytes) => Some(bytes),
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
-            {
-                None
-            }
-            Err(error) => return Err(io_error(error)),
-        };
+        let expected = assets::read_previous(&path, asset)?;
         let bytes = futty_assets::read(&source).map_err(io_error)?;
         assets::validate_asset(&scene, asset, &bytes)?;
         futty_assets::replace_saved(&path, asset, expected.as_deref(), &bytes).map_err(io_error)?;
@@ -1246,6 +1321,7 @@ fn scene_info(scene: &Scene) -> CallToolResult {
         .collect();
     CallToolResult::structured(json!({
         "name": scene.name,
+        "dimension": scene.dimension,
         "background": if scene.sky { "sky" } else { "solid" },
         "object_count": scene.entities.len(),
         "local_coop": scene.local_coop,
@@ -1314,6 +1390,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn capture_and_build_errors_carry_the_versioned_report_without_losing_mcp_codes() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Futty::new(dir.path().canonicalize().unwrap());
+        let schema = server.game_failure_schema().structured_content.unwrap();
+        assert_eq!(schema["properties"]["schema_version"]["const"], 1);
+        Scene::default()
+            .save_new(&server.root.join("Main.ron"))
+            .unwrap();
+        let capture = server
+            .scene_capture(Parameters(capture::Capture {
+                path: "Main.ron".into(),
+                output_path: "Preview.png".into(),
+                camera_id: None,
+                width: Some(0),
+                height: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(capture.code, invalid("").code);
+        let data = capture.data.unwrap();
+        assert_eq!(data["failure_report"]["stage"], "camera_capture");
+        assert_eq!(data["failure_report"]["code"], "execution_failed");
+        assert_eq!(
+            data["failure_report"]["context"]["output_path"],
+            "Preview.png"
+        );
+        assert!(!server.root.join("Preview.png").exists());
+
+        let build = server
+            .project_build(Parameters(BuildProject {
+                path: "Missing.futty.project.ron".into(),
+                output_path: "Windows".into(),
+                template_path: None,
+            }))
+            .await
+            .unwrap_err();
+        let data = build.data.unwrap();
+        assert_eq!(data["failure_report"]["stage"], "windows_build");
+        assert_eq!(
+            data["failure_report"]["context"]["path"],
+            "Missing.futty.project.ron"
+        );
+        assert_eq!(data["failure_report"]["context"]["output_path"], "Windows");
+        assert!(!server.root.join("Windows").exists());
+    }
 
     #[test]
     fn health_component_applies_damage_heal_death_and_checkpoint_restore() {
@@ -1389,6 +1512,78 @@ mod tests {
         assert_eq!(step(["jump"])["player"]["health"]["current"], 0.0);
         assert_eq!(step(["forward"])["hud"]["deaths"], 1.0);
         assert_eq!(step(["right"])["player"]["health"]["current"], 100.0);
+    }
+
+    #[test]
+    fn scene_create_persists_two_d_and_defaults_omitted_dimension_to_three_d() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Futty::new(dir.path().canonicalize().unwrap());
+        let create = |request| {
+            server
+                .scene_create(Parameters(serde_json::from_value(request).unwrap()))
+                .unwrap()
+                .structured_content
+                .unwrap()
+        };
+        let scene = create(json!({"path":"Flat.ron","name":"Flat","dimension":"TwoD"}));
+        assert_eq!(scene["dimension"], "TwoD");
+        assert_eq!(scene["background"], "solid");
+        let path = server.root.join("Flat.ron");
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("dimension: TwoD")
+        );
+        let loaded = Scene::load(&path).unwrap();
+        assert_eq!(loaded.dimension, SceneDimension::TwoD);
+        let camera = &loaded.entities[loaded.camera_index(None).unwrap()];
+        assert_eq!(
+            camera.camera.unwrap().projection,
+            futty_core::Projection::Orthographic
+        );
+        assert_eq!(camera.transform.translation, Vec3::Z * 10.0);
+        assert_eq!(camera.transform.rotation * Vec3::NEG_Z, Vec3::NEG_Z);
+        let info = server
+            .scene_inspect(Parameters(SceneFile {
+                path: "Flat.ron".into(),
+            }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(info["dimension"], "TwoD");
+        let space = create(json!({"path":"Space.ron","name":"Space"}));
+        assert_eq!(space["dimension"], "ThreeD");
+        assert_eq!(space["background"], "sky");
+        assert!(space["main_camera"].is_null());
+    }
+
+    #[test]
+    fn planar_collision_example_blocks_the_shortcut_and_accepts_the_route() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let server = Futty::new(repo);
+        let mut request: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../examples/planar-collision/playtest.json"
+        ))
+        .unwrap();
+        let play = |request| {
+            server
+                .play_test(Parameters(serde_json::from_value(request).unwrap()))
+                .unwrap()
+                .structured_content
+                .unwrap()
+        };
+        let solved = play(request.clone());
+        assert_eq!(solved["passed"], true, "{solved}");
+        request["steps"] = json!([{"actions":["right"],"ticks":90}]);
+        request["expect"] = json!("running");
+        let blocked = play(request);
+        assert_eq!(blocked["passed"], true, "{blocked}");
+        let position = &blocked["last_observation"]["player"]["position"];
+        assert!((-0.8..-0.58).contains(&position[0].as_f64().unwrap()));
+        assert_eq!(position[2].as_f64(), Some(2.0));
     }
 
     #[test]
@@ -1662,6 +1857,8 @@ mod tests {
         assert_eq!(valid["valid"], true, "{valid}");
         let mut idle = generated["playtest"].clone();
         idle["steps"] = json!([{"ticks":120}]);
+        idle["seed"] = json!(17);
+        idle["replay_path"] = json!("Idle.json");
         let missed = server
             .play_test(Parameters(serde_json::from_value(idle).unwrap()))
             .unwrap()
@@ -1672,6 +1869,15 @@ mod tests {
             missed["last_observation"]["hud"]["coins"].as_f64(),
             Some(0.0)
         );
+        let report = &missed["failure_report"];
+        assert_eq!(report["schema_version"], 1);
+        assert_eq!(report["code"], "unexpected_status");
+        assert_eq!(report["context"]["tick"], 120);
+        assert_eq!(report["context"]["seed"], 17);
+        assert_eq!(report["context"]["replay_path"], "Idle.json");
+        assert_eq!(report["evidence"]["expected"], "success");
+        assert_eq!(report["evidence"]["failed_checks"][0]["binding"], "coins");
+        assert!(root.join("Idle.json").is_file());
         let input = serde_json::from_value(generated["playtest"].clone()).unwrap();
         let outcome = server
             .play_test(Parameters(input))
@@ -1679,6 +1885,7 @@ mod tests {
             .structured_content
             .unwrap();
         assert_eq!(outcome["passed"], true, "{outcome}");
+        assert!(outcome.get("failure_report").is_none());
         assert_eq!(
             outcome["last_observation"]["hud"]["objective"],
             "All coins collected"
@@ -1698,6 +1905,105 @@ mod tests {
         let exe = root.join(built["executable"].as_str().unwrap());
         futty_build::validate_windows_template(&exe).unwrap();
         assert!(root.join("Windows").join(futty_build::MANIFEST).is_file());
+    }
+
+    #[test]
+    fn power_maze_template_requires_power_before_the_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Futty::new(dir.path().canonicalize().unwrap());
+        let created = server
+            .game_create_from_template(Parameters(templates::CreateGame {
+                template: templates::POWER_MAZE.into(),
+                output_path: "Maze".into(),
+            }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        let project = created["project_path"].as_str().unwrap();
+        let valid = server
+            .project_validate(Parameters(ProjectFile {
+                path: project.into(),
+            }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(valid["valid"], true, "{valid}");
+        let play = |recipe| {
+            server
+                .play_test(Parameters(serde_json::from_value(recipe).unwrap()))
+                .unwrap()
+                .structured_content
+                .unwrap()
+        };
+        let mut direct = created["playtest"].clone();
+        direct["steps"].as_array_mut().unwrap().truncate(2);
+        direct["expect"] = json!("running");
+        direct["expect_hud"] = json!({"power":0,"objective":"Exit locked. Find cell."});
+        let locked = play(direct);
+        assert_eq!(locked["passed"], true, "{locked}");
+        let success = play(created["playtest"].clone());
+        assert_eq!(success["passed"], true, "{success}");
+        assert_eq!(
+            success["last_observation"]["hud"]["objective"],
+            "Maze escaped"
+        );
+        assert!(
+            success["last_observation"]["visible_objects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|object| object["name"] != "Power cell")
+        );
+    }
+
+    #[test]
+    fn coin_runner_template_requires_the_jump_and_collects_three_coins() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Futty::new(dir.path().canonicalize().unwrap());
+        let created = server
+            .game_create_from_template(Parameters(templates::CreateGame {
+                template: templates::COIN_RUNNER.into(),
+                output_path: "Runner".into(),
+            }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        let path = created["project_path"].as_str().unwrap();
+        let valid = server
+            .project_validate(Parameters(ProjectFile { path: path.into() }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(valid["valid"], true, "{valid}");
+        let scene =
+            Scene::load(&server.root.join(created["scene_path"].as_str().unwrap())).unwrap();
+        assert_eq!(scene.dimension, SceneDimension::TwoD);
+        assert!(
+            scene
+                .entities
+                .iter()
+                .filter_map(|object| object.sprite)
+                .all(|sprite| sprite.planar.is_some())
+        );
+        let play = |recipe| {
+            server
+                .play_test(Parameters(serde_json::from_value(recipe).unwrap()))
+                .unwrap()
+                .structured_content
+                .unwrap()
+        };
+        let success = play(created["playtest"].clone());
+        assert_eq!(success["passed"], true, "{success}");
+        assert_eq!(
+            success["last_observation"]["hud"]["coins"].as_f64(),
+            Some(3.0)
+        );
+        let failure = play(json!({
+            "path":created["scene_path"],
+            "steps":[{"ticks":10},{"actions":["right"],"ticks":120},{"actions":["right"],"ticks":60}],
+            "expect":"failure","expect_hud":{"coins":1}
+        }));
+        assert_eq!(failure["passed"], true, "{failure}");
     }
 
     #[test]
@@ -1873,7 +2179,16 @@ mod tests {
         let result = play(3);
         assert_eq!(result["passed"], true, "{result}");
         assert!(result["checks"][1]["first_tick"].is_u64());
-        assert_eq!(play(5)["passed"], false);
+        let failed = play(5);
+        assert_eq!(failed["passed"], false);
+        assert_eq!(failed["failure_report"]["code"], "failed_checks");
+        assert_eq!(
+            failed["failure_report"]["evidence"]["failed_checks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         scene
             .script_sources
             .insert(script, "fn on_start(entity) {\n let x = ;\n}".into());
@@ -1881,6 +2196,13 @@ mod tests {
         let invalid = validate();
         assert_eq!(invalid["valid"], false);
         assert_eq!(invalid["scenes"][0]["issues"][0]["line"], 2);
+        let report = &invalid["failure_report"];
+        assert_eq!(report["stage"], "project_validation");
+        assert_eq!(report["code"], "validation_failed");
+        assert_eq!(
+            report["evidence"]["invalid_scenes"][0]["issues"][0]["line"],
+            2
+        );
     }
 
     #[test]
@@ -1909,9 +2231,12 @@ mod tests {
                 path: "broken.ron".into(),
             }))
             .unwrap();
-        let issue = &invalid.structured_content.unwrap()["issues"][0];
+        let invalid = invalid.structured_content.unwrap();
+        let issue = &invalid["issues"][0];
         assert_eq!(issue["field"], "parent");
         assert_eq!(issue["object_id"], json!(scene.entities[0].uuid));
+        assert_eq!(invalid["failure_report"]["stage"], "scene_validation");
+        assert_eq!(invalid["failure_report"]["evidence"]["issues"][0], *issue);
         assert_eq!(fs::read_to_string(broken).unwrap(), changed);
 
         let path = "Test.futty.project.ron";
@@ -2388,6 +2713,95 @@ mod tests {
     }
 
     #[test]
+    fn batch_assets_bind_and_preserve_ids_after_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let server = Futty::new(root.clone());
+        let path = "Main.ron";
+        let scene_path = root.join(path);
+        let mut scene = Scene::default();
+        let sprite = scene.entities[0].uuid;
+        let mut model = Object::cube("Model".into(), Vec3::X);
+        model.spin = false;
+        let model_id = model.uuid;
+        scene.entities.push(model);
+        let material = Uuid::new_v4();
+        scene.materials.insert(material, Material::default());
+        let widget = HudWidget::new(futty_runtime::HudKind::Image);
+        let image = widget.id;
+        scene.hud.push(widget);
+        scene.save_new(&scene_path).unwrap();
+        let original = include_bytes!("../../../examples/sprite-playground/Signal.png");
+        let replacement = include_bytes!("../../../examples/asset-preview/Workshop Grid.png");
+        fs::write(root.join("sprite.png"), original).unwrap();
+        fs::write(root.join("updated.png"), replacement).unwrap();
+        fs::write(root.join("invalid.wav"), b"not a WAV").unwrap();
+        fs::write(
+            root.join("bell.wav"),
+            include_bytes!("../../../examples/audio-playground/Chime.wav"),
+        )
+        .unwrap();
+        fs::write(
+            root.join("crate.glb"),
+            include_bytes!("../../../examples/asset-preview/Workshop Crate.glb"),
+        )
+        .unwrap();
+        let batch = |assets| {
+            server.asset_import_batch(Parameters(
+                serde_json::from_value(json!({"path":path,"assets":assets})).unwrap(),
+            ))
+        };
+        let result = batch(json!([
+            {"key":"texture","source":"sprite.png","bind":[{"target":"sprite","id":sprite,"size":[2,1]},
+                {"target":"material","id":material},{"target":"hud_image","id":image}]},
+            {"key":"sound","source":"bell.wav","bind":[{"target":"object","id":sprite}]},
+            {"key":"mesh","source":"crate.glb","bind":[{"target":"object","id":model_id}]}
+        ])).unwrap().structured_content.unwrap();
+        let id = |key: &str| serde_json::from_value::<Uuid>(result["assets"][key].clone()).unwrap();
+        let texture = id("texture");
+        let scene = Scene::load(&scene_path).unwrap();
+        assert_eq!(scene.entities[0].sprite.unwrap().texture, texture);
+        assert_eq!(scene.entities[0].audio_source.unwrap().clip, id("sound"));
+        assert_eq!(scene.entities[1].mesh, Some(id("mesh")));
+        assert_eq!(scene.materials[&material].texture, Some(texture));
+        assert_eq!(scene.hud[0].image, Some(texture));
+        let asset = scene
+            .assets
+            .iter()
+            .find(|asset| asset.id == texture)
+            .unwrap();
+        let saved_scene = fs::read(&scene_path).unwrap();
+        let failed = batch(json!([
+            {"key":"updated","source":"updated.png","asset_id":texture},
+            {"key":"broken","source":"invalid.wav"}
+        ]));
+        assert!(failed.is_err());
+        assert_eq!(
+            futty_assets::read_saved(&scene_path, asset).unwrap(),
+            original
+        );
+        assert!(
+            batch(json!([{"key":"bad_binding","source":"sprite.png",
+            "bind":[{"target":"hud_image","id":sprite}]}]))
+            .is_err()
+        );
+        assert_eq!(fs::read(&scene_path).unwrap(), saved_scene);
+        let replace = || {
+            batch(json!([{"key":"updated","source":"updated.png","asset_id":texture}]))
+                .unwrap()
+                .structured_content
+                .unwrap()
+        };
+        assert_eq!(replace()["assets"]["updated"], result["assets"]["texture"]);
+        assert_eq!(replace()["assets"]["updated"], result["assets"]["texture"]);
+        assert_eq!(fs::read(&scene_path).unwrap(), saved_scene);
+        assert_eq!(
+            futty_assets::read_saved(&scene_path, asset).unwrap(),
+            replacement
+        );
+    }
+
+    #[test]
     fn asset_reimport_preserves_material_and_object_references() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
@@ -2580,6 +2994,7 @@ mod tests {
             .scene_create(Parameters(NewScene {
                 path: path.into(),
                 name: "Main".into(),
+                dimension: SceneDimension::ThreeD,
             }))
             .unwrap();
         let load = || Scene::load(&server.root.join(path)).unwrap();
@@ -2653,6 +3068,7 @@ mod tests {
             server.scene_create(Parameters(NewScene {
                 path: path.into(),
                 name: name.into(),
+                dimension: SceneDimension::ThreeD,
             }))
         };
         create("Main").unwrap();

@@ -97,8 +97,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let sprite = in.material.a > 3.5;
     let texel_edge = vec2<f32>(0.5) / vec2<f32>(textureDimensions(base_color, 0));
     // Sprites reuse the surface parameters for their atlas rectangle.
-    let inset = min(texel_edge, in.surface.zw * 0.5);
-    let sprite_uv = in.surface.xy + clamp(in.uv * in.surface.zw, inset, in.surface.zw - inset);
+    let extent = abs(in.surface.zw);
+    let inset = min(texel_edge, extent * 0.5);
+    let coords = select(in.uv, vec2<f32>(1.0) - in.uv, in.surface.zw < vec2<f32>(0.0));
+    let sprite_uv = in.surface.xy + clamp(coords * extent, inset, extent - inset);
     let uv = select(in.uv, sprite_uv, sprite);
     let texel = textureSample(base_color, base_sampler, uv);
     if sprite {

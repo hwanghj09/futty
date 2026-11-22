@@ -107,7 +107,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1
 
 스크립트는 서버를 빌드하고 현재 폴더를 작업 경로로 지정해 Codex의 `futty` 등록을 갱신합니다. 열려 있는 세션에서 도구가 보이지 않으면 새 채팅을 시작하거나 Codex를 다시 실행합니다.
 
-- `scene_create`와 `scene_inspect`로 씬을 만들고 배경, 오브젝트 수, 카메라 UUID를 확인합니다.
+- `scene_create`와 `scene_inspect`로 씬을 만들고 차원, 배경, 오브젝트 수, 카메라 UUID를 확인합니다.
 - `scene_set_background`로 `sky` 또는 `solid`를 저장합니다. `scene_add_camera`로 위치와 바라볼 점을 지정하고 `scene_set_main_camera`에 카메라 UUID를 넘겨 게임 카메라를 선택합니다.
 - `scene_objects`는 오브젝트 UUID, 태그, 부모, 로컬 Transform, 컴포넌트와 에셋 참조를 반환합니다. `tag`, `object_id`, `offset`, `limit`으로 범위를 좁힐 수 있습니다.
 - `scene_apply`는 한 씬에 최대 64개의 편집을 순서대로 적용해 한 번에 저장합니다. 배치에서 만든 오브젝트의 `key`는 뒤에 나오는 작업의 `object`나 `parent`에서 사용할 수 있습니다. 작업이 실패하면 이전 씬 파일이 유지됩니다.
@@ -171,6 +171,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Cli
 | 도구 | 사용 방법 |
 | --- | --- |
 | `asset_import` | 저장된 씬의 `path`와 작업 폴더 안의 파일 `source`를 넘깁니다. GLB, PNG, WAV, Ogg를 검사한 뒤 씬 옆의 `Assets/Futty/`에 복사하고 등록된 UUID를 반환합니다. |
+| `asset_import_batch` | 한 씬에 새 에셋 등록과 UUID 유지 교체를 섞어서 처리하고, 오브젝트·스프라이트·공유 재질·HUD 이미지에 연결합니다. |
 | `asset_list` | `path`의 등록된 에셋과 공유 재질을 조회합니다. |
 | `asset_reimport` | `path`, `asset_id`, 같은 종류의 새 `source`를 지정합니다. 재질 및 오브젝트 참조에 쓰이는 UUID는 그대로 유지됩니다. GLB는 지정한 씬과 그 프리팹에서 참조하는 애니메이션 클립을 확인합니다. |
 | `material_create` / `material_update` | `path`와 `settings`를 넘기고 갱신 시에는 `material_id`도 지정합니다. 설정은 `name`, `color`, `texture`, `roughness`, `emission`, `emission_strength`입니다. 생략한 필드는 유지되며 `texture: null`은 텍스처 연결을 해제합니다. |
@@ -178,6 +179,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Cli
 `scene_apply`의 `attach_asset`으로 모델, 텍스처, 오디오를 오브젝트에 붙입니다. 공유 재질은 `{"op":"set_material","object":"floor","material_id":"<uuid>"}`로 할당합니다. `object`에는 기존 오브젝트 UUID 또는 현재 배치의 키를 쓸 수 있으며, `material_id: null`로 할당을 해제합니다.
 
 별도 도구로 등록하거나 교체한 에셋 파일과 재질 설정은 `scene_undo`의 범위 밖입니다. `scene_apply`에서 한 할당은 배치와 함께 되돌릴 수 있습니다.
+
+### 일괄 가져오기와 바인딩
+
+```json
+{
+  "path": "Scenes/Main.futty.scene.ron",
+  "assets": [
+    {"key":"hero","source":"Generated/sprites/hero_walk.png","asset_id":"<기존 에셋 UUID>",
+     "bind":[{"target":"sprite","id":"<캐릭터 오브젝트 UUID>","size":[1,1],"billboard":"Fixed"}]},
+    {"key":"pickup","source":"Generated/audio/pickup.wav",
+     "bind":[{"target":"object","id":"<오브젝트 UUID>"}]}
+  ]
+}
+```
+
+`asset_id`를 생략하면 새 UUID로 등록하고, 지정하면 같은 형식의 파일로 교체하면서 기존 UUID와 참조를 유지합니다. 응답의 `assets`는 각 `key`를 실제 UUID에 매핑합니다. 프리팹에 연결된 오브젝트는 원본에 바인딩합니다.
+
+- `object`는 에셋 종류에 따라 모델, 텍스처, 오디오 소스를 연결합니다. `sprite`는 PNG를 Sprite3D로 설정합니다. `material`과 `hud_image`는 기존 재질이나 HUD 이미지 위젯에 PNG를 연결합니다.
+- 파일·바인딩을 모두 검사한 뒤 반영합니다. 쓰기 오류가 발생하면 배치에서 이미 쓴 에셋 파일을 복구합니다. 호출당 에셋 32개, 바인딩 64개, 교체 백업 포함 128 MiB까지 처리합니다.
 
 ## MCP에서 Rhai 스크립트 작업하기
 
@@ -244,7 +264,27 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Cli
 
 이 입력을 `game_create_from_template`에 전달하면 새 폴더에 씬과 프로젝트 파일을 생성합니다. 기존 폴더의 내용은 보존됩니다. 반환된 `project_path`는 에디터에서 열거나 `project_build`에 전달하고, `playtest`는 그대로 `play_test`에 전달해 세 코인을 모으는지 확인할 수 있습니다. 직접 플레이할 때는 게임 화면을 클릭하고 기본 이동 키인 **WASD**를 사용합니다.
 
+### 2D Coin Runner
+
+```json
+{"template":"coin_runner_2d","output_path":"My-Coin-Runner"}
+```
+
+`game_create_from_template`가 Sprite2D 캐릭터와 시트 애니메이션, Rapier2D 발판 타일, 추적 카메라, 코인과 점수 HUD를 갖춘 횡스크롤 프로젝트를 만듭니다. `A`·`D`로 이동하고 `Space`로 틈을 건너 코인 세 개를 모으세요. 틈 아래로 떨어지면 실패합니다. 에디터에서 다시 시도할 때는 **Stop** 후 **Play**를 누릅니다.
+
+반환된 `playtest`로 점프와 코인 세 개 수집을 검증할 수 있습니다. 점프를 빼고 오른쪽으로 계속 이동하는 대조 테스트는 코인 하나를 모은 뒤 추락합니다. 템플릿의 PNG는 저장소의 프로토타입 에셋 생성기로 만든 파일이며, 프로젝트 폴더에 함께 복사됩니다. [프로토타입 에셋 생성기](../scripts/generate-prototype-assets.py)
+
 에디터를 열지 않고 전체 흐름을 검증하려면 반환된 `project_path`로 `project_validate`를 먼저 실행합니다. `playtest.steps`를 `[{"ticks":120}]`으로 바꾼 대조 테스트에서는 코인 0개와 실패한 판정을 확인할 수 있습니다. 원래 `playtest`로 코인 3개와 승리를 확인한 뒤, 같은 프로젝트에 `project_build`를 호출하면 새 폴더에 `Game.exe`가 생성됩니다.
+
+### 2D Power Maze
+
+```json
+{"template":"power_maze_2d","output_path":"My-Power-Maze"}
+```
+
+`game_create_from_template`가 시드 기반 미로, 충돌 벽, 직교 카메라, 애니메이션 캐릭터와 목표 HUD를 갖춘 탑다운 프로젝트를 만듭니다. `WASD`로 이동해 전원 셀을 얻고 출구로 돌아오세요. 전원 없이 출구에 닿으면 잠금 안내가 표시됩니다. 전원 셀은 닿으면 자동으로 수집됩니다.
+
+응답의 `playtest`로 전원을 모아 탈출하는 경로를 재현한 뒤, `project_path`를 `project_build`에 전달해 Windows 게임으로 내보낼 수 있습니다.
 
 ## MCP 프리팹과 씬 전환
 
@@ -262,6 +302,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Cli
 ```
 
 캡처에는 그래픽 어댑터가 필요합니다. 에디터 창을 열지 않고 저장된 씬의 3D 화면을 렌더링합니다. HUD와 실행 중 스크립트 상태는 포함되지 않습니다. 기존 PNG는 보존됩니다.
+
+## 제작 실패 리포트
+
+검증, 플레이테스트, 캡처, Windows 빌드는 단계와 오류 코드를 담은 `failure_report`를 반환합니다. JSON Schema는 MCP의 `game_failure_schema`에서 조회합니다. [필드와 응답 위치](failure-report.md)
 
 ## AI 플레이 세션
 
@@ -329,6 +373,20 @@ HUD 배치는 씬 파일에 저장되며 Play와 Windows 내보내기에도 적�
 ## Sprite3D
 
 ### 2D 씬 구성하기
+
+에디터에서 **File → New 2D Scene**을 선택하거나, MCP의 `scene_create`에 `{"path":"Main.futty.scene.ron","name":"Main","dimension":"TwoD"}`를 전달합니다. XY 평면을 바라보는 직교 카메라와 단색 배경으로 시작합니다. 기존 씬과 차원을 생략한 새 씬은 `ThreeD`로 열립니다. `scene_inspect`의 `dimension`으로 저장한 설정을 확인할 수 있습니다.
+
+`TwoD` 씬은 Rapier2D로 XY 평면의 충돌을 계산합니다. 오브젝트의 Z는 화면 깊이로 유지되며, Z가 서로 달라도 XY에서 겹치면 충돌합니다. 강체는 박스 형태이고, 캐릭터 컨트롤러는 캡슐을 사용합니다. 기존 `ThreeD` 씬은 Rapier3D를 사용합니다.
+
+#### Sprite2D와 직교 카메라 캡처
+
+2D 씬에 PNG를 가져온 후 **Place Sprite**로 배치합니다. **Inspector → Sprite2D**에서 크기, 레이어, 기준점, X/Y 뒤집기와 스프라이트 시트를 조정할 수 있습니다. 높은 레이어는 다른 스프라이트 위에 그려집니다. 기준점 `[0,0]`은 왼쪽 위, `[0.5,0.5]`는 중앙입니다.
+
+```json
+{"op":"set_sprite2d","object":"player","texture_id":"<PNG UUID>","size":[1.3,1.3],"layer":2,"pivot":[0.5,0.5],"flip":[true,false]}
+```
+
+위 작업을 `scene_apply`에 전달합니다. `scene_capture`는 씬의 직교 카메라에서 저장된 화면을 PNG로 출력합니다. [Planar Collision 예제](../examples/planar-collision/Planar%20Collision.futty.project.ron)를 열고 WASD로 벽을 돌아 초록색 목표에 도달하세요. 플레이어와 벽의 Z가 달라도 정면에서는 충돌합니다. [MCP 플레이테스트 입력](../examples/planar-collision/playtest.json)으로 우회 경로를 재현할 수 있습니다.
 
 화면을 XY 평면으로 쓰려면 카메라를 +Z 방향에 두고 씬을 바라보게 합니다. 에디터에서는 카메라를 **Orthographic**으로 지정합니다. MCP에서는 `add_camera` 또는 `scene_add_camera`에 화면 세로 반높이인 `orthographic_size`를 넘깁니다.
 
@@ -538,7 +596,7 @@ fn on_update(entity, dt) {
 
 ## 프로젝트와 씬 전환
 
-1. **File → Project → New Project…**에서 빈 폴더를 선택합니다. Futty가 그 폴더에 프로젝트 파일과 `Main.futty.scene.ron`을 만들고 첫 씬을 엽니다. 이미 만든 씬으로 시작하려면 **New Project from Current Scene…**을 사용합니다.
+1. **File → Project → New 2D Project…** 또는 **New 3D Project…**를 선택하고 빈 폴더를 지정합니다. Futty가 해당 차원의 시작 씬 `Main.futty.scene.ron`과 프로젝트 파일을 만듭니다. 이미 만든 씬으로 시작하려면 **New Project from Current Scene…**을 사용합니다.
 2. **Add Scene…**으로 프로젝트 폴더 안의 다른 씬을 등록합니다. **Start Scene**에서 프로젝트를 열거나 단독으로 실행할 때 처음 보여 줄 씬을 고릅니다. **Edit Scene**에서 편집할 파일을 전환합니다.
 3. 게임에서는 Rhai의 `load_scene("Pulse Range")`처럼 등록된 씬 ID를 넘겨 전환합니다. 에디터에서 등록할 때 ID는 씬 파일 이름의 확장자를 뺀 값입니다. 전환 대상의 카메라와 HUD, 스크립트를 새로 초기화합니다.
 

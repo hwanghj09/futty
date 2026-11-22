@@ -7,7 +7,7 @@ use std::{
 use eframe::egui;
 pub(crate) use futty_runtime::project::{Project, SceneList, is_project};
 use futty_runtime::{
-    Scene,
+    Scene, SceneDimension,
     project::{MAX_SCENES, SUFFIX},
 };
 
@@ -15,7 +15,7 @@ use crate::{Action, Document, Editor, menu_item, scene_dialog, workspace::Panel}
 
 #[derive(Clone, Copy)]
 pub(crate) enum ProjectAction {
-    New,
+    New(SceneDimension),
     FromCurrentScene,
     Open,
     Add,
@@ -29,7 +29,10 @@ fn project_dialog() -> rfd::FileDialog {
     rfd::FileDialog::new().add_filter("Futty project", &["futty.project.ron", "ron"])
 }
 
-fn create_project_folder(folder: &Path) -> Result<(Project, Scene, PathBuf), Box<dyn Error>> {
+fn create_project_folder(
+    folder: &Path,
+    dimension: SceneDimension,
+) -> Result<(Project, Scene, PathBuf), Box<dyn Error>> {
     let root = folder.canonicalize()?;
     if fs::read_dir(&root)?.next().transpose()?.is_some() {
         return Err("Choose an empty folder for the new project".into());
@@ -40,7 +43,7 @@ fn create_project_folder(folder: &Path) -> Result<(Project, Scene, PathBuf), Box
         .unwrap_or("Game");
     let manifest = root.join(format!("{name}{SUFFIX}"));
     let path = root.join("Main.futty.scene.ron");
-    let scene = Scene::default();
+    let scene = Scene::new(dimension);
     scene.save_new(&path)?;
     match Project::create(&manifest, &path) {
         Ok(project) => Ok((project, scene, path)),
@@ -59,7 +62,18 @@ impl Editor {
             let mut item = |ui: &mut egui::Ui, label, choice, enabled| {
                 menu_item(ui, label, Action::Project(choice), enabled, action);
             };
-            item(ui, "New Project…", ProjectAction::New, true);
+            item(
+                ui,
+                "New 3D Project…",
+                ProjectAction::New(SceneDimension::ThreeD),
+                true,
+            );
+            item(
+                ui,
+                "New 2D Project…",
+                ProjectAction::New(SceneDimension::TwoD),
+                true,
+            );
             item(
                 ui,
                 "New Project from Current Scene…",
@@ -134,7 +148,7 @@ impl Editor {
 
     fn apply_project_action(&mut self, action: ProjectAction) -> Result<(), Box<dyn Error>> {
         match action {
-            ProjectAction::New => {
+            ProjectAction::New(dimension) => {
                 let Some(folder) = rfd::FileDialog::new()
                     .set_title("Choose an empty folder for the new Futty project")
                     .pick_folder()
@@ -144,10 +158,10 @@ impl Editor {
                 if !self.confirm_close_document() {
                     return Ok(());
                 }
-                let (project, scene, path) = create_project_folder(&folder)?;
+                let (project, scene, path) = create_project_folder(&folder, dimension)?;
                 self.clear_assets();
                 self.doc = Document::new(scene, Some(path));
-                self.viewport.reset_camera();
+                self.reset_scene_camera();
                 self.show_panel(Panel::Scene);
                 self.report(format!("Created project {}", project.name()), false);
                 self.project = Some(project);
@@ -241,12 +255,14 @@ mod tests {
     #[test]
     fn new_project_opens_its_own_saved_scene() -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
-        let (project, mut scene, path) = create_project_folder(directory.path())?;
+        let (project, mut scene, path) =
+            create_project_folder(directory.path(), SceneDimension::TwoD)?;
         let reopened = Project::load(project.path())?;
         assert_eq!(reopened.list().start, "Main");
         assert_eq!(reopened.resolve("Main")?, path);
-        assert_eq!(Scene::load(&path)?.scene_uuid, scene.scene_uuid);
-        assert!(create_project_folder(directory.path()).is_err());
+        assert_eq!(Scene::load(&path)?, scene);
+        assert_eq!(scene.dimension, SceneDimension::TwoD);
+        assert!(create_project_folder(directory.path(), SceneDimension::ThreeD).is_err());
         assert_eq!(Scene::load(&path)?.scene_uuid, scene.scene_uuid);
         let script = futty_core::Asset {
             id: uuid::Uuid::new_v4(),

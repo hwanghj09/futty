@@ -42,7 +42,7 @@ pub use script::{
     ScriptValue, inspect_script, inspect_script_diagnostic,
 };
 use script::{Callback, MAX_WORLD_COMMANDS, Scripts, WorldCommand};
-pub use sprite::{Billboard, Sprite, SpriteSheet};
+pub use sprite::{Billboard, Sprite, Sprite2d, SpriteSheet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -218,10 +218,25 @@ impl Object {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SceneDimension {
+    TwoD,
+    #[default]
+    ThreeD,
+}
+
+impl SceneDimension {
+    fn is_three_d(&self) -> bool {
+        *self == Self::ThreeD
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Scene {
     format_version: u32,
+    #[serde(default, skip_serializing_if = "SceneDimension::is_three_d")]
+    pub dimension: SceneDimension,
     pub scene_uuid: Uuid,
     pub name: String,
     pub entities: Vec<Object>,
@@ -249,17 +264,37 @@ pub struct Scene {
 
 impl Default for Scene {
     fn default() -> Self {
+        Self::new(SceneDimension::ThreeD)
+    }
+}
+
+impl Scene {
+    pub fn new(dimension: SceneDimension) -> Self {
+        let (entities, main_camera) = match dimension {
+            SceneDimension::TwoD => {
+                let mut camera = Object::cube("2D Camera".into(), Vec3::Z * 10.0);
+                camera.spin = false;
+                camera.camera = Some(CameraLens {
+                    projection: futty_core::Projection::Orthographic,
+                    ..CameraLens::default()
+                });
+                let id = camera.uuid;
+                (vec![camera], Some(id))
+            }
+            SceneDimension::ThreeD => (vec![Object::cube("Cube".into(), Vec3::Y * 0.65)], None),
+        };
         Self {
             format_version: FORMAT_VERSION,
+            dimension,
             scene_uuid: Uuid::new_v4(),
             name: "Main".into(),
-            entities: vec![Object::cube("Cube".into(), Vec3::Y * 0.65)],
+            entities,
             assets: Vec::new(),
             materials: BTreeMap::new(),
             prefabs: BTreeMap::new(),
             script_sources: BTreeMap::new(),
-            main_camera: None,
-            sky: true,
+            main_camera,
+            sky: dimension == SceneDimension::ThreeD,
             training_range: None,
             hud: Vec::new(),
             input: InputProfile::default(),
@@ -361,7 +396,7 @@ impl Scene {
         })
     }
 
-    fn validate(&self) -> SceneResult<()> {
+    pub fn validate(&self) -> SceneResult<()> {
         if self.format_version != FORMAT_VERSION {
             return Err(format!("Unsupported scene version {}", self.format_version).into());
         }
@@ -761,7 +796,7 @@ struct RuntimeObject {
     transform: Transform,
     color: [f32; 3],
     spin: bool,
-    body: Option<(rapier3d::prelude::RigidBodyHandle, Motion)>,
+    body: Option<(physics::BodyHandle, Motion)>,
     kinematic_target: Option<Transform>,
     script: Option<Uuid>,
     character: Option<character::CharacterMotion>,
@@ -791,7 +826,12 @@ impl RuntimeObject {
                 .filter(|body| body.motion == Motion::Kinematic)
                 .map(|_| object.transform),
             script: object.script,
-            character: object.character.map(character::CharacterMotion::new),
+            character: object.character.map(|mut config| {
+                if matches!(physics, Physics::Planar(_)) && config.mode == CharacterMode::Spatial {
+                    config.mode = CharacterMode::TopDown2d;
+                }
+                character::CharacterMotion::new(config)
+            }),
             interaction: object.interaction.clone(),
             can_animate: object.mesh.is_some() && object.sprite.is_none() && object.has_renderer(),
             animation: object.animation.map(|animation| (animation, 0.0)),
@@ -882,7 +922,7 @@ impl Runtime {
     pub fn new(scene: &Scene) -> SceneResult<Self> {
         scene.validate()?;
         let mut world = World::new();
-        let mut physics = Physics::new();
+        let mut physics = Physics::new(scene.dimension);
         for object in &scene.entities {
             world.spawn(RuntimeObject::new(object, &mut physics));
         }
@@ -1122,7 +1162,10 @@ impl Runtime {
                 if object.uuid == player || inactive.contains(&object.uuid) {
                     return None;
                 }
-                let delta = script::world_position(&poses, object.uuid)? - origin;
+                let mut delta = script::world_position(&poses, object.uuid)? - origin;
+                if matches!(self.physics, Physics::Planar(_)) {
+                    delta.z = 0.0;
+                }
                 let distance = delta.length();
                 if distance > interaction.range
                     || (directional && delta.try_normalize()?.dot(forward) < 0.866)
@@ -1529,6 +1572,11 @@ impl Runtime {
             return;
         }
         let frame = seconds.clamp(0.0, 0.1);
+        let spin_axis = if matches!(self.physics, Physics::Planar(_)) {
+            Vec3::Z
+        } else {
+            Vec3::Y
+        };
         if let Some(poses) = self.scripts.as_ref().map(|scripts| scripts.poses.clone()) {
             self.refresh_query_poses(&poses);
         }
@@ -1586,8 +1634,9 @@ impl Runtime {
                         && let Some(target) = &mut object.kinematic_target
                     {
                         if spin {
-                            target.rotation =
-                                (Quat::from_rotation_y(STEP * 0.7) * target.rotation).normalize();
+                            target.rotation = (Quat::from_axis_angle(spin_axis, STEP * 0.7)
+                                * target.rotation)
+                                .normalize();
                         }
                         self.physics.move_kinematic(body, *target);
                     }
@@ -1656,7 +1705,7 @@ impl Runtime {
                 }
             }
         }
-        let rotation = Quat::from_rotation_y(frame * 0.7);
+        let rotation = Quat::from_axis_angle(spin_axis, frame * 0.7);
         let neutral = GameInput::default();
         for mut object in self.objects.iter_mut(&mut self.world) {
             if inactive.contains(&object.uuid) {
@@ -2480,10 +2529,13 @@ mod tests {
         )).unwrap();
         let scene = Scene::load(&path).unwrap();
         assert_eq!(scene.format_version, FORMAT_VERSION);
+        assert_eq!(scene.dimension, SceneDimension::ThreeD);
         assert!(!scene.sky);
         assert_eq!(scene.entities[0].uuid, object);
         assert_eq!(scene.entities[0].primitive, Primitive::Cube);
         assert!(scene.assets.is_empty() && scene.entities[0].parent.is_none());
+        scene.save(&path).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains("dimension:"));
     }
 
     #[test]
@@ -2555,6 +2607,7 @@ mod tests {
             size: glam::Vec2::new(2.0, 1.0),
             billboard: Billboard::Upright,
             sheet: None,
+            planar: None,
         };
         scene.entities[0].sprite = Some(sprite);
         assert!(scene.save(&path).is_err());

@@ -132,6 +132,7 @@ pub struct DrawObject {
     pub texture: Option<Uuid>,
     /// Sprite UV rectangle as [left, top, width, height].
     pub sprite: Option<[f32; 4]>,
+    pub sprite_layer: i16,
     pub surface: Surface,
     pub material_override: bool,
     pub animation: Option<AnimationSample>,
@@ -747,7 +748,11 @@ impl Renderer {
             })
             .collect();
         // shortcut: intersecting sprites sort by center depth, revisit if scenes need per-pixel ordering.
-        sprites.sort_by(|a, b| b.0.total_cmp(&a.0));
+        sprites.sort_by(|a, b| {
+            a.1.sprite_layer
+                .cmp(&b.1.sprite_layer)
+                .then_with(|| b.0.total_cmp(&a.0))
+        });
         for (_, object, uv) in sprites {
             let texture = object
                 .texture
@@ -1024,6 +1029,7 @@ mod tests {
             mesh: None,
             texture: None,
             sprite: None,
+            sprite_layer: 0,
             primitive: Primitive::Cube,
             surface: Surface::default(),
             material_override: true,
@@ -1059,6 +1065,7 @@ mod tests {
             mesh: None,
             texture: None,
             sprite: None,
+            sprite_layer: 0,
             primitive: Primitive::Cube,
             surface: Surface::default(),
             material_override: true,
@@ -1133,6 +1140,7 @@ mod tests {
             mesh: None,
             texture: None,
             sprite: None,
+            sprite_layer: 0,
             primitive: Primitive::Cube,
         };
         let mut sampled = |lights: &[LightInstance]| {
@@ -1205,6 +1213,7 @@ mod tests {
             mesh: None,
             texture: None,
             sprite: None,
+            sprite_layer: 0,
             primitive,
         };
         let objects = [
@@ -1257,7 +1266,8 @@ mod tests {
     #[test]
     #[ignore = "requires a local graphics adapter"]
     fn renders_sprite_alpha_and_respects_opaque_depth() {
-        let instance = gpu::Instance::new(gpu::InstanceDescriptor::new_without_display_handle());
+        let instance =
+            gpu::Instance::new(gpu::InstanceDescriptor::new_without_display_handle().with_env());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
         let (device, queue) =
             pollster::block_on(adapter.request_device(&Default::default())).unwrap();
@@ -1287,6 +1297,7 @@ mod tests {
             mesh: None,
             texture: Some(texture),
             sprite: Some([0.0, 0.0, 1.0, 1.0]),
+            sprite_layer: 0,
             primitive: Primitive::Cube,
         };
         renderer.draw(&device, &queue, &targets, default_scene(camera, &[]));
@@ -1307,6 +1318,36 @@ mod tests {
             blended.abs_diff(expected) <= 2,
             "Expected half red, got {blended}"
         );
+        let flipped = DrawObject {
+            sprite: Some([0.0, 0.0, -1.0, 1.0]),
+            ..sprite
+        };
+        renderer.draw(&device, &queue, &targets, default_scene(camera, &[flipped]));
+        let image = pixels(&device, &queue, &targets);
+        assert_eq!(&image[right..right + 4], &background[right..right + 4]);
+        assert!(image[left] > background[left]);
+        let white = Uuid::new_v4();
+        renderer.upload_image(&device, &queue, white, [1, 1], &[255; 4]);
+        let nearer = DrawObject {
+            matrix: Mat4::from_translation(Vec3::Z * 0.3),
+            color: [0.0, 1.0, 0.0],
+            texture: Some(white),
+            ..sprite
+        };
+        let higher = DrawObject {
+            color: [1.0, 0.0, 0.0],
+            texture: Some(white),
+            sprite_layer: 1,
+            ..sprite
+        };
+        renderer.draw(
+            &device,
+            &queue,
+            &targets,
+            default_scene(camera, &[higher, nearer]),
+        );
+        let layered = pixels(&device, &queue, &targets);
+        assert!(layered[right] > 245 && layered[right + 1] < 5);
         let solid = DrawObject {
             surface: Surface::default(),
             material_override: false,
@@ -1317,6 +1358,7 @@ mod tests {
             mesh: None,
             texture: None,
             sprite: None,
+            sprite_layer: 0,
             primitive: Primitive::Cube,
         };
         renderer.draw(
@@ -1366,6 +1408,7 @@ mod tests {
             mesh: Some(model_id),
             texture: None,
             sprite: None,
+            sprite_layer: 0,
             primitive: Primitive::Cube,
         };
         let camera = Camera::default().view_projection(1.0);

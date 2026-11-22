@@ -133,7 +133,7 @@ impl PhysicsEvent {
     }
 }
 
-pub(crate) struct Physics {
+pub(crate) struct SpatialPhysics {
     world: PhysicsWorld,
     collector: ChannelEventCollector,
     incoming: mpsc::Receiver<CollisionEvent>,
@@ -142,7 +142,7 @@ pub(crate) struct Physics {
     prepared: bool,
 }
 
-impl Physics {
+impl SpatialPhysics {
     pub(crate) fn new() -> Self {
         let (sender, incoming) = mpsc::channel();
         let world = PhysicsWorld {
@@ -350,4 +350,119 @@ fn query_filter(mask: u32) -> QueryFilter<'static> {
             Group::from_bits_truncate(mask),
             InteractionTestMode::And,
         ))
+}
+
+#[path = "physics2d.rs"]
+mod planar;
+use planar::PlanarPhysics;
+
+#[derive(Clone, Copy)]
+pub(crate) enum BodyHandle {
+    Spatial(RigidBodyHandle),
+    Planar(rapier2d::prelude::RigidBodyHandle),
+}
+
+pub(crate) enum Physics {
+    Spatial(Box<SpatialPhysics>),
+    Planar(Box<PlanarPhysics>),
+}
+
+macro_rules! world_call {
+    ($world:expr, $method:ident($($arg:expr),*)) => {
+        match $world {
+            Physics::Spatial(world) => world.$method($($arg),*),
+            Physics::Planar(world) => world.$method($($arg),*),
+        }
+    };
+}
+
+macro_rules! body_call {
+    ($world:expr, $handle:expr, $method:ident($($arg:expr),*)) => {
+        match ($world, $handle) {
+            (Physics::Spatial(world), BodyHandle::Spatial(handle)) => world.$method(handle $(, $arg)*),
+            (Physics::Planar(world), BodyHandle::Planar(handle)) => world.$method(handle $(, $arg)*),
+            _ => unreachable!("Body handle belongs to the runtime's physics world"),
+        }
+    };
+}
+
+impl Physics {
+    pub(crate) fn new(dimension: crate::SceneDimension) -> Self {
+        match dimension {
+            crate::SceneDimension::TwoD => Self::Planar(Box::new(PlanarPhysics::new())),
+            crate::SceneDimension::ThreeD => Self::Spatial(Box::new(SpatialPhysics::new())),
+        }
+    }
+
+    pub(crate) fn insert(&mut self, id: Uuid, transform: Transform, config: Body) -> BodyHandle {
+        match self {
+            Self::Spatial(world) => BodyHandle::Spatial(world.insert(id, transform, config)),
+            Self::Planar(world) => BodyHandle::Planar(world.insert(id, transform, config)),
+        }
+    }
+
+    pub(crate) fn move_kinematic(&mut self, handle: BodyHandle, target: Transform) {
+        body_call!(self, handle, move_kinematic(target));
+    }
+
+    pub(crate) fn apply_commands(
+        &mut self,
+        handle: BodyHandle,
+        commands: &crate::script::Commands,
+    ) {
+        body_call!(self, handle, apply_commands(commands));
+    }
+
+    pub(crate) fn pose(&self, handle: BodyHandle, transform: &mut Transform) {
+        body_call!(self, handle, pose(transform));
+    }
+
+    pub(crate) fn remove(&mut self, handle: BodyHandle) {
+        body_call!(self, handle, remove());
+    }
+
+    pub(crate) fn set_enabled(&mut self, handle: BodyHandle, enabled: bool) {
+        body_call!(self, handle, set_enabled(enabled));
+    }
+
+    pub(crate) fn prepare_queries(&mut self) {
+        world_call!(self, prepare_queries());
+    }
+
+    pub(crate) fn step(&mut self) {
+        world_call!(self, step());
+    }
+
+    pub(crate) fn recent(&self) -> &[PhysicsEvent] {
+        world_call!(self, recent())
+    }
+
+    pub(crate) fn count(&self) -> usize {
+        world_call!(self, count())
+    }
+
+    pub(crate) fn events(&self) -> &VecDeque<PhysicsEvent> {
+        world_call!(self, events())
+    }
+
+    pub(crate) fn raycast(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        distance: f32,
+        mask: u32,
+    ) -> Option<RayHit> {
+        world_call!(self, raycast(origin, direction, distance, mask))
+    }
+
+    pub(crate) fn move_capsule(
+        &self,
+        dt: f32,
+        center: Vec3,
+        size: [f32; 2],
+        delta: Vec3,
+        mask: u32,
+    ) -> (Vec3, bool) {
+        world_call!(self, move_capsule(dt, center, size, delta, mask))
+    }
 }

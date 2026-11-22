@@ -135,10 +135,22 @@ pub fn draw_objects(
                 surface: material.map_or_else(Default::default, |material| material.surface),
                 material_override: material.is_some(),
                 sprite: object.sprite.map(|sprite| {
-                    sprite.sheet.map_or([0.0, 0.0, 1.0, 1.0], |sheet| {
+                    let mut uv = sprite.sheet.map_or([0.0, 0.0, 1.0, 1.0], |sheet| {
                         sheet.uv_rect(sprite_times.get(&object.uuid).copied().unwrap_or(0.0))
-                    })
+                    });
+                    if let Some(planar) = sprite.planar {
+                        for (extent, flip) in uv[2..].iter_mut().zip(planar.flip) {
+                            if flip {
+                                *extent = -*extent;
+                            }
+                        }
+                    }
+                    uv
                 }),
+                sprite_layer: object
+                    .sprite
+                    .and_then(|sprite| sprite.planar)
+                    .map_or(0, |planar| planar.layer),
                 animation: animations
                     .get(&object.uuid)
                     .copied()
@@ -200,6 +212,11 @@ mod tests {
             texture,
             size: glam::Vec2::ONE,
             billboard: futty_runtime::Billboard::Fixed,
+            planar: Some(futty_runtime::Sprite2d {
+                layer: 3,
+                pivot: [0.0, 0.0],
+                flip: [true, false],
+            }),
             sheet: Some(futty_runtime::SpriteSheet {
                 columns: 2,
                 rows: 1,
@@ -253,10 +270,16 @@ mod tests {
                 None,
             )
         };
-        assert_eq!(frame(None).instances[0].sprite, Some([0.0, 0.0, 0.5, 1.0]));
+        let saved = frame(None);
+        assert_eq!(saved.instances[0].sprite, Some([0.0, 0.0, -0.5, 1.0]));
+        assert_eq!(saved.instances[0].sprite_layer, 3);
+        assert_eq!(
+            saved.instances[0].matrix.w_axis.truncate(),
+            scene.entities[0].transform.translation + Vec3::new(0.5, -0.5, 0.0)
+        );
         runtime.tick(0.1);
         let played = frame(Some(&mut runtime));
-        assert_eq!(played.instances[0].sprite, Some([0.5, 0.0, 0.5, 1.0]));
+        assert_eq!(played.instances[0].sprite, Some([0.5, 0.0, -0.5, 1.0]));
         assert_eq!(played.view.eye, Vec3::new(5.0, 2.0, 10.0));
     }
 

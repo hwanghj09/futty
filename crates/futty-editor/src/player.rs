@@ -560,6 +560,7 @@ mod tests {
             size: Vec2::ONE,
             billboard: Billboard::Fixed,
             sheet: None,
+            planar: None,
         });
         scene.assets.push(asset.clone());
         let texture = Asset {

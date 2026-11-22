@@ -32,7 +32,7 @@ use document::Document;
 use eframe::{egui, wgpu};
 use egui::{Color32, Key, RichText};
 use futty_core::{AssetKind, Camera, LightKind, Primitive};
-use futty_runtime::{AudioSource, Object, Runtime, Scene};
+use futty_runtime::{AudioSource, Object, Runtime, Scene, SceneDimension};
 use glam::{EulerRot, Quat, Vec3};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use selection::selected_tree;
@@ -192,7 +192,7 @@ impl Play {
 
 #[derive(Clone, Copy)]
 enum Action {
-    New,
+    New(SceneDimension),
     PhysicsPlayground,
     ScriptPlayground,
     AudioPlayground,
@@ -413,6 +413,15 @@ impl Editor {
         }
     }
 
+    fn reset_scene_camera(&mut self) {
+        self.viewport.reset_camera();
+        if self.doc.scene.dimension == SceneDimension::TwoD {
+            self.viewport.camera.eye = Vec3::Z * 10.0;
+            self.viewport.camera.look_at(Vec3::ZERO);
+            self.viewport.frame(Vec3::ZERO, 10.0);
+        }
+    }
+
     fn open_scene(&mut self, path: std::path::PathBuf) -> bool {
         if !self.confirm_close_document() {
             return false;
@@ -436,7 +445,7 @@ impl Editor {
                     self.project = None;
                 }
                 self.doc = Document::new(scene, Some(path));
-                self.viewport.reset_camera();
+                self.reset_scene_camera();
                 self.show_panel(Panel::Scene);
                 true
             }
@@ -721,10 +730,10 @@ impl Editor {
         }
         let before = self.doc.scene.clone();
         match action {
-            Action::New if self.confirm_close_document() => {
+            Action::New(dimension) if self.confirm_close_document() => {
                 self.clear_assets();
-                self.doc = Document::new(Scene::default(), None);
-                self.viewport.reset_camera();
+                self.doc = Document::new(Scene::new(dimension), None);
+                self.reset_scene_camera();
                 self.report("New scene", false);
             }
             Action::PhysicsPlayground if self.confirm_close_document() => {
@@ -1025,7 +1034,20 @@ impl Editor {
                 ui.separator();
                 ui.add_enabled_ui(!playing, |ui| {
                     ui.menu_button("File", |ui| {
-                        menu_item(ui, "New Scene", Action::New, true, action);
+                        menu_item(
+                            ui,
+                            "New 3D Scene",
+                            Action::New(SceneDimension::ThreeD),
+                            true,
+                            action,
+                        );
+                        menu_item(
+                            ui,
+                            "New 2D Scene",
+                            Action::New(SceneDimension::TwoD),
+                            true,
+                            action,
+                        );
                         menu_item(
                             ui,
                             "Physics Playground",
@@ -2100,9 +2122,16 @@ impl eframe::App for Editor {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(RichText::new(&self.gpu_label).color(MUTED));
                         ui.separator();
+                        let dimension = match self.doc.scene.dimension {
+                            SceneDimension::TwoD => "2D",
+                            SceneDimension::ThreeD => "3D",
+                        };
                         ui.label(
-                            RichText::new(format!("{} objects", self.doc.scene.entities.len()))
-                                .color(MUTED),
+                            RichText::new(format!(
+                                "{dimension} · {} objects",
+                                self.doc.scene.entities.len()
+                            ))
+                            .color(MUTED),
                         );
                     });
                 })

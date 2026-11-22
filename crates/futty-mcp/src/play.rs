@@ -21,6 +21,7 @@ use crate::{
     authoring::invalid,
     io_error,
     replay::{Fingerprint, MAX_TICKS, Mark, PlayTest, Replay},
+    report::{self, Code, Context, Evidence, Stage},
 };
 
 const MAX_SESSIONS: usize = 4;
@@ -148,6 +149,8 @@ impl PlayRunner {
             for step in &input.steps {
                 step.validate()?;
             }
+            let mut context = Context::new(&input.path);
+            context.seed = Some(input.seed);
             let mut current = Session::load(
                 &path,
                 input.path,
@@ -192,10 +195,15 @@ impl PlayRunner {
                 checks.push(json!({"kind":"scene","expected":scene,"actual":current.requested_scene,"passed":current.requested_scene.as_deref() == Some(scene.as_str())}));
             }
             let passed = status == expected && checks.iter().all(|check| check["passed"] == true);
-            if let Some(file) = output {
-                current.replay.save(&file)?;
+            context.tick = Some(current.tick);
+            if let Some(file) = output
+                && let Err(error) = current.replay.save(&file)
+            {
+                context.output_path = input.replay_path;
+                return Err(report::execution(error, Stage::Playtest, context));
             }
-            Ok(CallToolResult::structured(json!({
+            context.replay_path = input.replay_path.clone();
+            let mut result = json!({
                 "passed": passed,
                 "checks": checks,
                 "expected": expected,
@@ -203,7 +211,20 @@ impl PlayRunner {
                 "tick": current.tick,
                 "replay_path": input.replay_path,
                 "last_observation": last_observation,
-            })))
+            });
+            if !passed {
+                let (code, message) = if status != expected {
+                    (Code::UnexpectedStatus, "Playtest ended with a different status")
+                } else {
+                    (Code::FailedChecks, "Playtest expectations did not match")
+                };
+                let failed_checks = checks.into_iter().filter(|check| check["passed"] == false).collect();
+                result["failure_report"] = report::failure(
+                    Stage::Playtest, code, message, context,
+                    Some(Evidence::Playtest { expected, actual: status, failed_checks }),
+                );
+            }
+            Ok(CallToolResult::structured(result))
         })
     }
 
@@ -721,9 +742,11 @@ impl Session {
             candidates
                 .into_iter()
                 .filter(|&(distance, position, object)| {
-                    self.runtime
-                        .raycast(camera.eye, position - camera.eye, distance, u32::MAX)
-                        .is_none_or(|hit| hit.entity == object.uuid)
+                    self.scene.dimension == futty_runtime::SceneDimension::TwoD
+                        || self
+                            .runtime
+                            .raycast(camera.eye, position - camera.eye, distance, u32::MAX)
+                            .is_none_or(|hit| hit.entity == object.uuid)
                 })
                 .take(MAX_VISIBLE)
                 .map(|(distance, position, object)| {

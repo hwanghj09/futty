@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use eframe::egui;
 use futty_core::{Asset, AssetKind};
-use futty_runtime::{Billboard, Object, Scene, Sprite, SpriteSheet};
+use futty_runtime::{Billboard, Object, Scene, SceneDimension, Sprite, Sprite2d, SpriteSheet};
 use glam::{Vec2, Vec3};
 use uuid::Uuid;
 
@@ -17,6 +17,7 @@ fn sprite_object(asset: &Asset, position: Vec3, size: Vec2, billboard: Billboard
         size,
         billboard,
         sheet: None,
+        planar: None,
     });
     object
 }
@@ -40,12 +41,17 @@ impl Editor {
             .map(|object| object.transform.translation.x)
             .reduce(f32::max)
             .map_or(0.0, |x| x + 2.0);
-        let object = sprite_object(
+        let mut object = sprite_object(
             asset,
             Vec3::new(x, size.y * 0.5, 0.0),
             size,
             Billboard::FaceCamera,
         );
+        if self.doc.scene.dimension == SceneDimension::TwoD {
+            let sprite = object.sprite.as_mut().unwrap();
+            sprite.planar = Some(Sprite2d::default());
+            sprite.billboard = Billboard::Fixed;
+        }
         self.hierarchy_search.clear();
         self.doc.selection.replace(Some(object.uuid));
         self.doc.scene.entities.push(object);
@@ -106,7 +112,11 @@ pub(crate) fn inspector(
     assets: &[Asset],
     loaded: &HashMap<Uuid, Vec<u8>>,
 ) {
-    ui.strong("Sprite3D");
+    ui.strong(if sprite.planar.is_some() {
+        "Sprite2D"
+    } else {
+        "Sprite3D"
+    });
     ui.separator();
     let texture = assets
         .iter()
@@ -126,15 +136,37 @@ pub(crate) fn inspector(
                 });
             }
         });
-    ui.label("Billboard");
-    egui::ComboBox::from_id_salt("billboard")
-        .width(ui.available_width())
-        .selected_text(sprite.billboard.label())
-        .show_ui(ui, |ui| {
-            for mode in [Billboard::FaceCamera, Billboard::Upright, Billboard::Fixed] {
-                ui.selectable_value(&mut sprite.billboard, mode, mode.label());
+    let mut planar = sprite.planar.is_some();
+    if ui.checkbox(&mut planar, "XY sprite").changed() {
+        sprite.planar = planar.then(Sprite2d::default);
+    }
+    if let Some(planar) = &mut sprite.planar {
+        ui.add(egui::DragValue::new(&mut planar.layer).prefix("Layer "));
+        ui.horizontal(|ui| {
+            for (axis, value) in ["Pivot X ", "Y "].into_iter().zip(&mut planar.pivot) {
+                ui.add(
+                    egui::DragValue::new(value)
+                        .range(0.0..=1.0)
+                        .speed(0.01)
+                        .prefix(axis),
+                );
             }
         });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut planar.flip[0], "Flip X");
+            ui.checkbox(&mut planar.flip[1], "Flip Y");
+        });
+    } else {
+        ui.label("Billboard");
+        egui::ComboBox::from_id_salt("billboard")
+            .width(ui.available_width())
+            .selected_text(sprite.billboard.label())
+            .show_ui(ui, |ui| {
+                for mode in [Billboard::FaceCamera, Billboard::Upright, Billboard::Fixed] {
+                    ui.selectable_value(&mut sprite.billboard, mode, mode.label());
+                }
+            });
+    }
     ui.horizontal(|ui| {
         for (label, value) in [("W ", &mut sprite.size.x), ("H ", &mut sprite.size.y)] {
             ui.add(

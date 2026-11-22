@@ -1,0 +1,9 @@
+{
+  "path": "examples/planar-collision/Planar Collision.futty.scene.ron",
+  "steps": [
+    {"actions": ["forward"], "ticks": 38},
+    {"actions": ["right"], "ticks": 78},
+    {"actions": ["backward"], "ticks": 38}
+  ],
+  "expect": "success"
+}

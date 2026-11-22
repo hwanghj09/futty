@@ -17,6 +17,26 @@ mod tests {
     use futty_core::Camera;
 
     #[test]
+    fn sheet_wraps_or_holds_the_last_cell_of_its_range() {
+        let mut sheet = SpriteSheet {
+            columns: 2,
+            rows: 2,
+            first_frame: 1,
+            frames: 3,
+            fps: 4.0,
+            looping: true,
+        };
+        assert!(sheet.valid());
+        assert_eq!(sheet.uv_rect(0.0), [0.5, 0.0, 0.5, 0.5]);
+        assert_eq!(sheet.uv_rect(0.25), [0.0, 0.5, 0.5, 0.5]);
+        assert_eq!(sheet.uv_rect(0.75), sheet.uv_rect(0.0));
+        sheet.looping = false;
+        assert_eq!(sheet.uv_rect(1.25), [0.5, 0.5, 0.5, 0.5]);
+        sheet.first_frame = 2;
+        assert!(!sheet.valid());
+    }
+
+    #[test]
     fn billboard_modes_keep_the_center_size_and_expected_orientation() {
         let mut camera = Camera::default();
         let center = Vec3::new(1.0, 1.5, -0.5);
@@ -27,6 +47,7 @@ mod tests {
             texture: Uuid::new_v4(),
             size: Vec2::new(2.0, 1.0),
             billboard: Billboard::FaceCamera,
+            sheet: None,
         };
         let screen_facing = sprite.matrix(world, camera.view());
         assert_eq!(screen_facing.w_axis.truncate(), center);
@@ -67,6 +88,49 @@ pub struct Sprite {
     pub texture: Uuid,
     pub size: Vec2,
     pub billboard: Billboard,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<SpriteSheet>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpriteSheet {
+    pub columns: u16,
+    pub rows: u16,
+    pub first_frame: u16,
+    pub frames: u16,
+    pub fps: f32,
+    pub looping: bool,
+}
+
+impl SpriteSheet {
+    fn valid(self) -> bool {
+        (1..=256).contains(&self.columns)
+            && (1..=256).contains(&self.rows)
+            && self.frames > 0
+            && u32::from(self.first_frame) + u32::from(self.frames)
+                <= u32::from(self.columns) * u32::from(self.rows)
+            && (1.0..=60.0).contains(&self.fps)
+    }
+
+    pub fn uv_rect(self, seconds: f64) -> [f32; 4] {
+        let count = u32::from(self.frames).max(1);
+        let elapsed = (seconds * f64::from(self.fps)).max(0.0).floor();
+        let step = if self.looping {
+            (elapsed % f64::from(count)) as u32
+        } else {
+            (elapsed as u32).min(count - 1)
+        };
+        let frame = u32::from(self.first_frame) + step;
+        let columns = u32::from(self.columns).max(1);
+        let cell = [1.0 / columns as f32, 1.0 / f32::from(self.rows.max(1))];
+        [
+            (frame % columns) as f32 * cell[0],
+            (frame / columns) as f32 * cell[1],
+            cell[0],
+            cell[1],
+        ]
+    }
 }
 
 impl Sprite {
@@ -101,5 +165,6 @@ impl Sprite {
         self.size.is_finite()
             && self.size.min_element() >= 0.01
             && self.size.max_element() <= 1000.0
+            && self.sheet.is_none_or(SpriteSheet::valid)
     }
 }

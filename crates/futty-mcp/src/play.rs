@@ -11,6 +11,7 @@ use futty_runtime::{
     ActionState, FIXED_STEP_SECONDS, GameInput, GameOutcome, Hierarchy, HudKind, InputAction,
     Runtime, Scene, ScriptValue,
 };
+use glam::Vec3;
 use rmcp::{ErrorData, model::CallToolResult, schemars};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -97,6 +98,7 @@ impl PlayRunner {
                     actions: input.actions,
                     ticks: input.ticks,
                     look: input.look,
+                    players: input.players,
                 },
                 |_| {},
             )?;
@@ -302,6 +304,8 @@ pub(crate) struct Step {
     look: Option<[f32; 2]>,
     /// If present, reject this step unless the session is still on this tick.
     expected_tick: Option<u32>,
+    #[serde(default)]
+    players: Vec<PlayerControls>,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize, schemars::JsonSchema)]
@@ -325,6 +329,48 @@ pub(crate) struct Controls {
     ticks: Option<u32>,
     /// Relative yaw and pitch in degrees, applied once.
     look: Option<[f32; 2]>,
+    /// Independent inputs for up to four characters in the same simulation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    players: Vec<PlayerControls>,
+}
+
+#[derive(Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PlayerControls {
+    #[schemars(with = "String")]
+    player_id: Uuid,
+    #[serde(default)]
+    actions: Vec<Action>,
+    look: Option<[f32; 2]>,
+}
+
+fn valid_look(look: Option<[f32; 2]>) -> bool {
+    look.is_none_or(|angles| {
+        angles
+            .into_iter()
+            .all(|angle| (-180.0..=180.0).contains(&angle))
+    })
+}
+
+type HeldActions = [bool; InputAction::ALL.len()];
+
+fn held_actions(actions: &[Action]) -> HeldActions {
+    let mut held = [false; InputAction::ALL.len()];
+    for action in actions {
+        held[action.input() as usize] = true;
+    }
+    held
+}
+
+fn step_input(held: HeldActions, previous: HeldActions, first: bool) -> GameInput {
+    GameInput {
+        actions: std::array::from_fn(|index| ActionState {
+            held: held[index],
+            pressed: first && held[index] && !previous[index],
+            released: first && !held[index] && previous[index],
+        }),
+        ..Default::default()
+    }
 }
 
 impl Controls {
@@ -333,12 +379,25 @@ impl Controls {
         if !(1..=MAX_STEP_TICKS).contains(&ticks) || self.actions.len() > MOVEMENT_ACTIONS.len() {
             return Err(invalid("Use 1 to 120 ticks and up to six actions"));
         }
-        if self.look.is_some_and(|angles| {
-            !angles
-                .into_iter()
-                .all(|angle| (-180.0..=180.0).contains(&angle))
-        }) {
+        if !valid_look(self.look) {
             return Err(invalid("Look angles must be between -180 and 180 degrees"));
+        }
+        if !self.players.is_empty() {
+            let mut ids = HashSet::new();
+            if self.players.len() > 4
+                || !self.actions.is_empty()
+                || self.look.is_some()
+                || self.players.iter().any(|player| {
+                    player.player_id.is_nil()
+                        || !ids.insert(player.player_id)
+                        || player.actions.len() > MOVEMENT_ACTIONS.len()
+                        || !valid_look(player.look)
+                })
+            {
+                return Err(invalid(
+                    "Provide up to four distinct player inputs without top-level actions or look",
+                ));
+            }
         }
         Ok(ticks)
     }
@@ -405,8 +464,10 @@ struct Session {
     scene: Scene,
     runtime: Runtime,
     camera_index: usize,
+    player_index: usize,
     tick: u32,
-    held: [bool; InputAction::ALL.len()],
+    held: HeldActions,
+    player_held: BTreeMap<Uuid, HeldActions>,
     requested_scene: Option<String>,
     replay: Replay,
 }
@@ -432,14 +493,11 @@ impl Session {
         } = source;
         let camera_index = scene
             .camera_index(None)
-            .filter(|&index| {
-                scene.entities[index].character.is_some() && scene.training_range.is_none()
-            })
-            .ok_or_else(|| {
-                invalid(
-                    "Play requires a main camera with a character controller in a standard scene",
-                )
-            })?;
+            .filter(|_| scene.training_range.is_none())
+            .ok_or_else(|| invalid("Play requires a camera in a standard scene"))?;
+        let player_index = scene
+            .player_index()
+            .ok_or_else(|| invalid("Play requires an object with a character controller"))?;
         let mut runtime = Runtime::new(&scene).map_err(io_error)?;
         runtime.start_seeded_scripts(&scene, &scripts, seed);
         runtime.prepare_play();
@@ -448,8 +506,10 @@ impl Session {
             scene,
             runtime,
             camera_index,
+            player_index,
             tick: 0,
             held: [false; InputAction::ALL.len()],
+            player_held: BTreeMap::new(),
             requested_scene,
             replay: Replay::new(scene_path, digest, seed, max_ticks),
         };
@@ -476,27 +536,57 @@ impl Session {
             return Err(invalid("This play session has ended"));
         }
         let ticks = input.validate()?;
+        if input.players.iter().any(|player| {
+            !self.scene.entities.iter().any(|object| {
+                object.uuid == player.player_id
+                    && object.character.is_some_and(|controller| {
+                        player.look.is_none() || controller.mode.is_spatial()
+                    })
+            })
+        }) {
+            return Err(invalid(
+                "Each player_id must identify a character; only spatial characters accept look",
+            ));
+        }
+        for player in &input.players {
+            if let Some([yaw, pitch]) = player.look {
+                self.runtime.look_character(player.player_id, yaw, pitch);
+            }
+        }
         if let Some([yaw, pitch]) = input.look
             && !self
                 .runtime
-                .look_character(self.scene.entities[self.camera_index].uuid, yaw, pitch)
+                .look_character(self.scene.entities[self.player_index].uuid, yaw, pitch)
         {
-            return Err(io_error("The character camera is missing"));
+            return Err(invalid("Only a spatial character accepts look"));
         }
-        let mut held = [false; InputAction::ALL.len()];
-        for action in &input.actions {
-            held[action.input() as usize] = true;
-        }
+        let held = held_actions(&input.actions);
+        let player_held: BTreeMap<_, _> = input
+            .players
+            .iter()
+            .map(|player| (player.player_id, held_actions(&player.actions)))
+            .collect();
+        let neutral = [false; InputAction::ALL.len()];
         for index in 0..ticks.min(self.replay.max_ticks - self.tick) {
-            let actions = std::array::from_fn(|action| ActionState {
-                held: held[action],
-                pressed: index == 0 && held[action] && !self.held[action],
-                released: index == 0 && !held[action] && self.held[action],
-            });
-            self.runtime.game_input(GameInput {
-                actions,
-                ..Default::default()
-            });
+            if player_held.is_empty() {
+                self.runtime
+                    .game_input(step_input(held, self.held, index == 0));
+            } else {
+                self.runtime.game_input(GameInput::default());
+                for (&id, &actions) in &player_held {
+                    let prior = self.player_held.get(&id).copied().unwrap_or(neutral);
+                    self.runtime
+                        .game_input_for(id, step_input(actions, prior, index == 0));
+                }
+                if index == 0 {
+                    for (&id, &prior) in &self.player_held {
+                        if !player_held.contains_key(&id) {
+                            self.runtime
+                                .game_input_for(id, step_input(neutral, prior, true));
+                        }
+                    }
+                }
+            }
             self.runtime.tick(FIXED_STEP_SECONDS);
             self.tick += 1;
             self.requested_scene = self.runtime.take_scene_request();
@@ -507,6 +597,7 @@ impl Session {
             }
         }
         self.held = held;
+        self.player_held = player_held;
         self.replay.steps.push(input);
         Ok(())
     }
@@ -529,17 +620,24 @@ impl Session {
     fn record_tick(&mut self) {
         let mut state: Vec<_> = self.runtime.extract().collect();
         state.sort_unstable_by_key(|entry| entry.0);
-        let player = self.scene.entities[self.camera_index].uuid;
-        let mut player_position = self.scene.entities[self.camera_index]
+        let player = self.scene.entities[self.player_index].uuid;
+        let mut player_position = self.scene.entities[self.player_index]
             .transform
             .translation
             .to_array();
         let mut signature = Fingerprint::new();
         for (id, transform, color) in state {
+            if !self.runtime.is_active(id) {
+                signature.add(b"inactive");
+            }
             if id == player {
                 player_position = transform.translation.to_array();
             }
             signature.add(id.as_bytes());
+            if let Some(health) = self.runtime.health_state(id) {
+                signature.add(&health.current.to_bits().to_le_bytes());
+                signature.add(&health.max.to_bits().to_le_bytes());
+            }
             for value in transform
                 .translation
                 .to_array()
@@ -552,6 +650,9 @@ impl Session {
             }
         }
         signature.add(json!(self.hud()).to_string().as_bytes());
+        if !self.runtime.game_state().is_empty() {
+            signature.add(json!(self.runtime.game_state()).to_string().as_bytes());
+        }
         if let Some(target) = &self.requested_scene {
             signature.add(target.as_bytes());
         }
@@ -599,7 +700,7 @@ impl Session {
                 .iter()
                 .zip(worlds)
                 .filter_map(|(object, world)| {
-                    if !object.has_renderer() {
+                    if !object.has_renderer() || !self.runtime.is_active(object.uuid) {
                         return None;
                     }
                     let position = world.w_axis.truncate();
@@ -632,11 +733,35 @@ impl Session {
                         "tags": object.tags,
                         "position": position.to_array(),
                         "distance": distance,
+                        "health": self.runtime.health_state(object.uuid),
                     })
                 })
                 .collect::<Vec<_>>()
         };
+        let primary = self.scene.entities[self.player_index].uuid;
+        let player_pose = local[self.player_index];
+        let focus = self
+            .runtime
+            .interaction_focus(primary)
+            .map(|(target, prompt)| json!({"object_id":target,"prompt":prompt}));
+        let players: Vec<_> = self.scene.entities.iter().filter(|object| object.character.is_some())
+            .map(|object| {
+                let pose = state.get(&object.uuid).copied().unwrap_or(object.transform);
+                let interaction = self.runtime.interaction_focus(object.uuid)
+                    .map(|(target, prompt)| json!({"object_id":target,"prompt":prompt}));
+                json!({
+                    "id":object.uuid,"active":self.runtime.is_active(object.uuid),"position":pose.translation.to_array(),
+                    "forward":(pose.rotation * Vec3::NEG_Z).to_array(),"interaction":interaction,
+                    "health":self.runtime.health_state(object.uuid),
+                })
+            }).collect();
         let status = self.status();
+        let game_state: BTreeMap<_, _> = self
+            .runtime
+            .game_state()
+            .iter()
+            .map(|(key, value)| (key, hud_value(value.clone())))
+            .collect();
         Ok(json!({
             "scene": self.scene.name,
             "tick": self.tick,
@@ -644,11 +769,15 @@ impl Session {
             "status": status,
             "requested_scene": self.requested_scene,
             "player": {
-                "id": self.scene.entities[self.camera_index].uuid,
-                "position": camera.eye.to_array(),
-                "forward": camera.forward().to_array(),
+                "id": primary,
+                "position": player_pose.translation.to_array(),
+                "forward": (player_pose.rotation * Vec3::NEG_Z).to_array(),
+                "interaction": focus,
+                "health": self.runtime.health_state(primary),
             },
+            "players": players,
             "hud": self.hud(),
+            "game_state": game_state,
             "visible_objects": visible_objects,
             "actions": if status == Status::Running { &MOVEMENT_ACTIONS[..] } else { &[] },
         }))

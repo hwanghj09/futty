@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 mod audio;
 mod character;
+mod health;
 mod hud;
 mod input;
 mod prefab;
@@ -25,7 +26,8 @@ mod range;
 mod script;
 mod sprite;
 pub use audio::{AudioCue, AudioListener, AudioSource, AudioStart};
-pub use character::CharacterController;
+pub use character::{CharacterController, CharacterMode};
+pub use health::{Health, HealthState};
 pub use hud::{HudAnchor, HudKind, HudWidget, MAX_HUD_WIDGETS, range_hud_value};
 pub use input::InputProfile;
 pub use prefab::{Prefab, PrefabLink};
@@ -40,7 +42,7 @@ pub use script::{
     ScriptValue, inspect_script, inspect_script_diagnostic,
 };
 use script::{Callback, MAX_WORLD_COMMANDS, Scripts, WorldCommand};
-pub use sprite::{Billboard, Sprite};
+pub use sprite::{Billboard, Sprite, SpriteSheet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,6 +105,32 @@ impl Default for Animation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Interaction {
+    pub prompt: String,
+    pub range: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CameraFollow2d {
+    pub tag: String,
+    pub offset: [f32; 2],
+    pub axes: [bool; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<[[f32; 2]; 2]>,
+}
+
+impl Default for Interaction {
+    fn default() -> Self {
+        Self {
+            prompt: "Interact".into(),
+            range: 2.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Object {
     pub uuid: Uuid,
     pub name: String,
@@ -130,11 +158,17 @@ pub struct Object {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<CameraLens>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_follow: Option<CameraFollow2d>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub light: Option<Light>,
     #[serde(default)]
     pub body: Option<Body>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character: Option<CharacterController>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<Interaction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<Health>,
     #[serde(default)]
     pub script: Option<Uuid>,
     #[serde(default)]
@@ -170,9 +204,12 @@ impl Object {
             material: None,
             sprite: None,
             camera: None,
+            camera_follow: None,
             light: None,
             body: None,
             character: None,
+            interaction: None,
+            health: None,
             script: None,
             script_fields: ScriptFields::new(),
             audio_source: None,
@@ -206,6 +243,8 @@ pub struct Scene {
     pub hud: Vec<HudWidget>,
     #[serde(default, skip_serializing_if = "InputProfile::is_empty")]
     pub input: InputProfile,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_coop: bool,
 }
 
 impl Default for Scene {
@@ -224,6 +263,7 @@ impl Default for Scene {
             training_range: None,
             hud: Vec::new(),
             input: InputProfile::default(),
+            local_coop: false,
         }
     }
 }
@@ -248,6 +288,27 @@ impl Default for Material {
 }
 
 impl Scene {
+    pub fn local_player_two(&self) -> Option<usize> {
+        if !self.local_coop || self.training_range.is_some() {
+            return None;
+        }
+        let first = self.player_index()?;
+        self.entities
+            .iter()
+            .enumerate()
+            .position(|(index, object)| index != first && object.character.is_some())
+    }
+
+    pub fn player_index(&self) -> Option<usize> {
+        self.camera_index(None)
+            .filter(|&index| self.entities[index].character.is_some())
+            .or_else(|| {
+                self.entities
+                    .iter()
+                    .position(|object| object.character.is_some())
+            })
+    }
+
     pub fn camera_index(&self, preferred: Option<Uuid>) -> Option<usize> {
         let by_id = |id| {
             self.entities
@@ -272,7 +333,26 @@ impl Scene {
         local: &[Transform],
     ) -> Option<CameraView> {
         let lens = self.entities[index].camera?;
-        let eye = worlds[index].w_axis.truncate();
+        let mut eye = worlds[index].w_axis.truncate();
+        // shortcut: follow the first tagged scene object, add runtime target selection if gameplay needs it
+        if lens.projection == futty_core::Projection::Orthographic
+            && let Some(follow) = &self.entities[index].camera_follow
+            && let Some((target, _)) = self
+                .entities
+                .iter()
+                .enumerate()
+                .find(|(target, object)| *target != index && object.tags.contains(&follow.tag))
+        {
+            let point = worlds[target].w_axis.truncate();
+            for axis in 0..2 {
+                if follow.axes[axis] && point[axis].is_finite() {
+                    eye[axis] = point[axis] + follow.offset[axis];
+                    if let Some([min, max]) = follow.bounds {
+                        eye[axis] = eye[axis].clamp(min[axis], max[axis]);
+                    }
+                }
+            }
+        }
         let rotation = hierarchy.world_rotation(index, |index| local[index].rotation);
         (lens.valid() && eye.is_finite() && rotation.is_normalized()).then_some(CameraView {
             eye,
@@ -383,6 +463,48 @@ impl Scene {
         let mut ids = HashSet::new();
         let mut listener = false;
         for object in objects {
+            if object.camera_follow.as_ref().is_some_and(|follow| {
+                object.camera.is_none()
+                    || !hud::valid_binding(&follow.tag)
+                    || follow
+                        .offset
+                        .iter()
+                        .any(|value| !(-100_000.0..=100_000.0).contains(value))
+                    || !follow.axes.into_iter().any(|axis| axis)
+                    || follow.bounds.is_some_and(|[min, max]| {
+                        (0..2).any(|axis| {
+                            !(-100_000.0..=100_000.0).contains(&min[axis])
+                                || !(min[axis]..=100_000.0).contains(&max[axis])
+                        })
+                    })
+            }) {
+                return Err(scene_issue(
+                    "camera_follow",
+                    Some(object.uuid),
+                    "Invalid orthographic camera follow settings",
+                ));
+            }
+            if object
+                .health
+                .is_some_and(|health| !(0.01..=1_000_000.0).contains(&health.max))
+            {
+                return Err(scene_issue(
+                    "health",
+                    Some(object.uuid),
+                    "Maximum health must be in 0.01–1000000",
+                ));
+            }
+            if object.interaction.as_ref().is_some_and(|interaction| {
+                !(0.1..=25.0).contains(&interaction.range)
+                    || interaction.prompt.len() > 128
+                    || interaction.prompt.chars().any(char::is_control)
+            }) {
+                return Err(scene_issue(
+                    "interaction",
+                    Some(object.uuid),
+                    "Invalid interaction range or prompt",
+                ));
+            }
             if object.uuid.is_nil() || !ids.insert(object.uuid) {
                 return Err(scene_issue(
                     "uuid",
@@ -634,6 +756,7 @@ impl Hierarchy {
 #[derive(Component)]
 struct RuntimeObject {
     uuid: Uuid,
+    parent: Option<Uuid>,
     name: String,
     transform: Transform,
     color: [f32; 3],
@@ -642,14 +765,17 @@ struct RuntimeObject {
     kinematic_target: Option<Transform>,
     script: Option<Uuid>,
     character: Option<character::CharacterMotion>,
+    interaction: Option<Interaction>,
     can_animate: bool,
     animation: Option<(Animation, f64)>,
+    sprite_time: Option<f64>,
 }
 
 impl RuntimeObject {
     fn new(object: &Object, physics: &mut Physics) -> Self {
         Self {
             uuid: object.uuid,
+            parent: object.parent,
             name: object.name.clone(),
             transform: object.transform,
             color: object.color,
@@ -666,8 +792,14 @@ impl RuntimeObject {
                 .map(|_| object.transform),
             script: object.script,
             character: object.character.map(character::CharacterMotion::new),
+            interaction: object.interaction.clone(),
             can_animate: object.mesh.is_some() && object.sprite.is_none() && object.has_renderer(),
             animation: object.animation.map(|animation| (animation, 0.0)),
+            sprite_time: object
+                .sprite
+                .and_then(|sprite| sprite.sheet)
+                .filter(|sheet| sheet.frames > 1)
+                .map(|_| 0.0),
         }
     }
 
@@ -678,6 +810,9 @@ impl RuntimeObject {
         callback: Callback,
         world_commands: &mut Vec<WorldCommand>,
     ) {
+        if scripts.inactive.borrow().contains(&self.uuid) {
+            return;
+        }
         if let Some(script) = self.script {
             let commands = scripts.call(
                 self.uuid,
@@ -713,20 +848,34 @@ pub struct Runtime {
     objects: QueryState<&'static mut RuntimeObject>,
     physics: Physics,
     accumulated: f32,
+    inactive: std::rc::Rc<std::cell::RefCell<HashSet<Uuid>>>,
     scripts: Option<Scripts>,
     audio_sources: HashMap<Uuid, AudioSource>,
     audio_cues: VecDeque<AudioCue>,
     audio_gain: f32,
     range: Option<range::Range>,
     input: GameInput,
+    player_inputs: HashMap<Uuid, std::rc::Rc<GameInput>>,
+    secondary_character: Option<Uuid>,
+    primary_character: Option<Uuid>,
     commands: Vec<WorldCommand>,
     prefabs: BTreeMap<Uuid, Prefab>,
     spawned: Vec<Object>,
     branches: HashMap<Uuid, Vec<(Uuid, Entity)>>,
     stopped_audio: Vec<Uuid>,
     hud_values: BTreeMap<String, ScriptValue>,
+    progress: std::rc::Rc<ScriptFields>,
+    checkpoints: HashMap<Uuid, Checkpoint>,
+    health: health::HealthStates,
     scene_request: Option<String>,
     outcome: Option<GameOutcome>,
+}
+
+struct Checkpoint {
+    transform: Transform,
+    progress: std::rc::Rc<ScriptFields>,
+    hud: BTreeMap<String, ScriptValue>,
+    health: Option<HealthState>,
 }
 
 impl Runtime {
@@ -767,6 +916,7 @@ impl Runtime {
             objects,
             physics,
             accumulated: 0.0,
+            inactive: Default::default(),
             scripts: None,
             audio_sources,
             audio_cues,
@@ -777,12 +927,26 @@ impl Runtime {
                 .map(|config| range::Range::new(scene, config))
                 .transpose()?,
             input: GameInput::default(),
+            player_inputs: HashMap::new(),
+            secondary_character: scene
+                .local_player_two()
+                .map(|index| scene.entities[index].uuid),
+            primary_character: scene.player_index().map(|index| scene.entities[index].uuid),
             commands: Vec::new(),
             prefabs: scene.prefabs.clone(),
             spawned: Vec::new(),
             branches: HashMap::new(),
             stopped_audio: Vec::new(),
             hud_values: BTreeMap::new(),
+            progress: Default::default(),
+            checkpoints: HashMap::new(),
+            health: std::rc::Rc::new(std::cell::RefCell::new(
+                scene
+                    .entities
+                    .iter()
+                    .filter_map(|object| object.health.map(|health| (object.uuid, health.into())))
+                    .collect(),
+            )),
             scene_request: None,
             outcome: None,
         })
@@ -790,6 +954,16 @@ impl Runtime {
 
     pub fn start_scripts(&mut self, scene: &Scene, sources: &HashMap<Uuid, String>) {
         self.start_scripts_with_seed(scene, sources, None);
+    }
+
+    pub fn game_state(&self) -> &ScriptFields {
+        &self.progress
+    }
+
+    /// Use before starting the destination scene's scripts.
+    pub fn with_game_state(mut self, state: ScriptFields) -> Self {
+        self.progress = state.into();
+        self
     }
 
     pub fn start_seeded_scripts(
@@ -817,7 +991,12 @@ impl Runtime {
         let ids = seed.map(|seed| {
             script::SpawnIds::new(seed, scene.entities.iter().map(|object| object.uuid))
         });
-        let mut scripts = Scripts::new(ids);
+        let mut scripts = Scripts::new(ids, self.health.clone());
+        scripts.progress = self.progress.clone();
+        scripts.input = self.input.clone().into();
+        scripts.player_inputs.clone_from(&self.player_inputs);
+        self.inactive = scripts.inactive.clone();
+        self.refresh_query_poses(&scripts.poses);
         for (&id, prefab) in &self.prefabs {
             scripts
                 .prefabs
@@ -865,10 +1044,102 @@ impl Runtime {
     }
 
     pub fn game_input(&mut self, input: GameInput) {
+        self.player_inputs.clear();
         self.input = input;
         if let Some(scripts) = &mut self.scripts {
             scripts.input = self.input.clone().into();
+            scripts.player_inputs.clear();
         }
+    }
+
+    pub fn local_game_input(&mut self, first: GameInput, second: GameInput) {
+        if let (Some(primary), Some(secondary)) = (self.primary_character, self.secondary_character)
+        {
+            self.game_input(GameInput::default());
+            self.game_input_for(primary, first);
+            self.game_input_for(secondary, second);
+        } else {
+            self.game_input(first);
+        }
+    }
+
+    /// Supply input for one character. Unassigned players receive neutral input.
+    pub fn game_input_for(&mut self, id: Uuid, input: GameInput) -> bool {
+        if !self
+            .objects
+            .iter(&self.world)
+            .any(|object| object.uuid == id && object.character.is_some())
+        {
+            return false;
+        }
+        if self.player_inputs.is_empty() {
+            self.game_input(GameInput::default());
+        }
+        let input = std::rc::Rc::new(input);
+        self.player_inputs.insert(id, input.clone());
+        if let Some(scripts) = &mut self.scripts {
+            scripts.player_inputs.insert(id, input);
+        }
+        true
+    }
+
+    /// Focused target and prompt for an active character looking at an interactable.
+    pub fn interaction_focus(&mut self, player: Uuid) -> Option<(Uuid, String)> {
+        if self
+            .health_state(player)
+            .is_some_and(|health| !health.alive())
+        {
+            return None;
+        }
+        let inactive = self.inactive.borrow();
+        if inactive.contains(&player)
+            || !self
+                .objects
+                .iter(&self.world)
+                .any(|o| o.interaction.is_some())
+        {
+            return None;
+        }
+        let poses: script::QueryPoses = self
+            .objects
+            .iter(&self.world)
+            .map(|object| (object.uuid, (object.parent, object.transform)))
+            .collect();
+        let origin = script::world_position(&poses, player)?;
+        let actor = self
+            .objects
+            .iter(&self.world)
+            .find(|o| o.uuid == player && o.character.is_some())?;
+        let forward = actor.transform.rotation * Vec3::NEG_Z;
+        let directional = actor
+            .character
+            .as_ref()
+            .is_some_and(character::CharacterMotion::is_spatial);
+        self.objects
+            .iter(&self.world)
+            .filter_map(|object| {
+                let interaction = object.interaction.as_ref()?;
+                if object.uuid == player || inactive.contains(&object.uuid) {
+                    return None;
+                }
+                let delta = script::world_position(&poses, object.uuid)? - origin;
+                let distance = delta.length();
+                if distance > interaction.range
+                    || (directional && delta.try_normalize()?.dot(forward) < 0.866)
+                {
+                    return None;
+                }
+                if self
+                    .physics
+                    .raycast(origin, delta, distance, u32::MAX)
+                    .is_some_and(|hit| hit.entity != object.uuid)
+                {
+                    return None;
+                }
+                Some((distance, object.uuid, &interaction.prompt))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+            .map(|(_, id, prompt)| (id, prompt.clone()))
     }
 
     pub fn prepare_play(&mut self) {
@@ -894,11 +1165,13 @@ impl Runtime {
         if !yaw_degrees.is_finite() || !pitch_degrees.is_finite() {
             return false;
         }
-        let Some(mut object) = self
-            .objects
-            .iter_mut(&mut self.world)
-            .find(|object| object.uuid == id && object.character.is_some())
-        else {
+        let Some(mut object) = self.objects.iter_mut(&mut self.world).find(|object| {
+            object.uuid == id
+                && object
+                    .character
+                    .as_ref()
+                    .is_some_and(character::CharacterMotion::is_spatial)
+        }) else {
             return false;
         };
         let forward = object.transform.rotation * Vec3::NEG_Z;
@@ -928,6 +1201,15 @@ impl Runtime {
     pub fn hud_value(&self, name: &str) -> Option<ScriptValue> {
         self.range_status()
             .and_then(|status| range_hud_value(name, Some(status)))
+            .or_else(|| {
+                let id = match name {
+                    "player.health" => self.primary_character,
+                    "player2.health" => self.secondary_character,
+                    _ => None,
+                }?;
+                self.health_state(id)
+                    .map(|health| ScriptValue::Number(f64::from(health.current / health.max)))
+            })
             .or_else(|| self.hud_values.get(name).cloned())
     }
 
@@ -954,6 +1236,28 @@ impl Runtime {
         &self.spawned
     }
 
+    pub fn is_active(&self, id: Uuid) -> bool {
+        !self.inactive.borrow().contains(&id)
+    }
+
+    pub fn health_state(&self, id: Uuid) -> Option<HealthState> {
+        self.health.borrow().get(&id).copied()
+    }
+
+    pub fn inactive_objects(&self) -> std::cell::Ref<'_, HashSet<Uuid>> {
+        self.inactive.borrow()
+    }
+
+    fn refresh_query_poses(&mut self, poses: &std::cell::RefCell<script::QueryPoses>) {
+        let mut poses = poses.borrow_mut();
+        poses.clear();
+        poses.extend(
+            self.objects
+                .iter(&self.world)
+                .map(|object| (object.uuid, (object.parent, object.transform))),
+        );
+    }
+
     fn apply_world_commands(&mut self) {
         if self.commands.is_empty() {
             return;
@@ -963,6 +1267,29 @@ impl Runtime {
         };
         for command in std::mem::take(&mut self.commands) {
             match command {
+                WorldCommand::HealthChange {
+                    target,
+                    source,
+                    delta,
+                } => {
+                    self.change_health(&mut scripts, target, source, delta);
+                }
+                WorldCommand::Interact { actor, target } => {
+                    if self.is_active(actor)
+                        && self.health_state(actor).is_none_or(HealthState::alive)
+                        && let Some(mut object) = self
+                            .objects
+                            .iter_mut(&mut self.world)
+                            .find(|object| object.uuid == target)
+                    {
+                        object.run_script(
+                            &mut scripts,
+                            &mut self.physics,
+                            Callback::Event("on_interact", actor),
+                            &mut self.commands,
+                        );
+                    }
+                }
                 WorldCommand::Message(message) => {
                     if let Some(mut target) = self
                         .objects
@@ -983,9 +1310,85 @@ impl Runtime {
                     position,
                 } => self.spawn_prefab(&mut scripts, prefab, root, position),
                 WorldCommand::Despawn(root) => self.despawn_prefab(&mut scripts, root),
+                WorldCommand::SetActive(id, active) => {
+                    if let Some(object) = self
+                        .objects
+                        .iter(&self.world)
+                        .find(|object| object.uuid == id)
+                    {
+                        if active {
+                            self.inactive.borrow_mut().remove(&id);
+                        } else if self.inactive.borrow_mut().insert(id) {
+                            self.audio_cues.retain(|cue| cue.object != id);
+                            if self.audio_sources.contains_key(&id) {
+                                self.stopped_audio.push(id);
+                            }
+                        }
+                        if let Some((body, _)) = object.body {
+                            self.physics.set_enabled(body, active);
+                        }
+                    }
+                }
                 WorldCommand::HudSet { name, value } => {
                     if self.hud_values.len() < 128 || self.hud_values.contains_key(&name) {
                         self.hud_values.insert(name, value);
+                    }
+                }
+                WorldCommand::GameSet(key, value) => {
+                    let progress = std::rc::Rc::make_mut(&mut self.progress);
+                    if let Some(value) = value {
+                        if progress.len() < 128 || progress.contains_key(&key) {
+                            progress.insert(key, value);
+                        } else {
+                            scripts.push("Game state limit reached (128 keys)".into());
+                        }
+                    } else {
+                        progress.remove(&key);
+                    }
+                    scripts.progress = self.progress.clone();
+                }
+                WorldCommand::SaveCheckpoint(id) => {
+                    if self.health_state(id).is_some_and(|health| !health.alive()) {
+                        continue;
+                    }
+                    if let Some(object) = self
+                        .objects
+                        .iter(&self.world)
+                        .find(|object| object.uuid == id && object.character.is_some())
+                    {
+                        self.checkpoints.insert(
+                            id,
+                            Checkpoint {
+                                transform: object.transform,
+                                progress: self.progress.clone(),
+                                hud: self.hud_values.clone(),
+                                health: self.health_state(id),
+                            },
+                        );
+                    }
+                }
+                WorldCommand::RestoreCheckpoint(id) => {
+                    if let Some(checkpoint) = self.checkpoints.get(&id)
+                        && let Some(mut object) = self
+                            .objects
+                            .iter_mut(&mut self.world)
+                            .find(|object| object.uuid == id)
+                    {
+                        object.transform = checkpoint.transform;
+                        if let Some(character) = &mut object.character {
+                            character.reset();
+                        }
+                        self.inactive.borrow_mut().remove(&id);
+                        self.progress = checkpoint.progress.clone();
+                        scripts.progress = self.progress.clone();
+                        self.hud_values.clone_from(&checkpoint.hud);
+                        if let Some(health) = checkpoint.health {
+                            self.health.borrow_mut().insert(id, health);
+                        }
+                        scripts
+                            .poses
+                            .borrow_mut()
+                            .insert(id, (object.parent, object.transform));
                     }
                 }
                 WorldCommand::LoadScene(id) => {
@@ -999,6 +1402,43 @@ impl Runtime {
         self.scripts = Some(scripts);
     }
 
+    fn change_health(&mut self, scripts: &mut Scripts, target: Uuid, source: Uuid, delta: f32) {
+        if !self.is_active(target) {
+            return;
+        }
+        let (amount, died) = {
+            let mut states = self.health.borrow_mut();
+            let Some(state) = states.get_mut(&target).filter(|state| state.alive()) else {
+                return;
+            };
+            let before = state.current;
+            state.current = (before + delta).clamp(0.0, state.max);
+            ((state.current - before).abs(), !state.alive())
+        };
+        if amount > 0.0
+            && let Some(mut object) = self
+                .objects
+                .iter_mut(&mut self.world)
+                .find(|object| object.uuid == target)
+        {
+            let event = if delta < 0.0 { "on_damage" } else { "on_heal" };
+            object.run_script(
+                scripts,
+                &mut self.physics,
+                Callback::Health(event, source, amount),
+                &mut self.commands,
+            );
+            if died {
+                object.run_script(
+                    scripts,
+                    &mut self.physics,
+                    Callback::Event("on_death", source),
+                    &mut self.commands,
+                );
+            }
+        }
+    }
+
     fn spawn_prefab(&mut self, scripts: &mut Scripts, id: Uuid, root: Uuid, position: Vec3) {
         let Some(prefab) = self.prefabs.get(&id) else {
             return;
@@ -1010,11 +1450,18 @@ impl Runtime {
         let copies = prefab.copies(root, position, true, || scripts.next_spawn_id());
         let mut branch = Vec::with_capacity(copies.len());
         for object in &copies {
+            if let Some(health) = object.health {
+                self.health.borrow_mut().insert(object.uuid, health.into());
+            }
             let entity = self
                 .world
                 .spawn(RuntimeObject::new(object, &mut self.physics))
                 .id();
             branch.push((object.uuid, entity));
+            scripts
+                .poses
+                .borrow_mut()
+                .insert(object.uuid, (object.parent, object.transform));
             for tag in &object.tags {
                 scripts
                     .tags
@@ -1065,6 +1512,8 @@ impl Runtime {
                 self.physics.remove(body);
             }
             self.world.despawn(entity);
+            self.checkpoints.remove(&id);
+            self.health.borrow_mut().remove(&id);
             scripts.forget(id);
             if self.audio_sources.remove(&id).is_some() {
                 self.stopped_audio.push(id);
@@ -1080,13 +1529,45 @@ impl Runtime {
             return;
         }
         let frame = seconds.clamp(0.0, 0.1);
+        if let Some(poses) = self.scripts.as_ref().map(|scripts| scripts.poses.clone()) {
+            self.refresh_query_poses(&poses);
+        }
         self.apply_world_commands();
+        if self.scripts.is_some() {
+            let mut actors: Vec<_> = self
+                .objects
+                .iter(&self.world)
+                .filter(|object| {
+                    object.character.is_some()
+                        && (!self.player_inputs.is_empty()
+                            || self.primary_character == Some(object.uuid))
+                        && self
+                            .player_inputs
+                            .get(&object.uuid)
+                            .map_or(&self.input, AsRef::as_ref)
+                            .action(InputAction::Interact)
+                            .pressed
+                })
+                .map(|object| object.uuid)
+                .collect();
+            actors.sort_unstable();
+            for actor in actors {
+                if self.commands.len() >= MAX_WORLD_COMMANDS {
+                    break;
+                }
+                if let Some((target, _)) = self.interaction_focus(actor) {
+                    self.commands.push(WorldCommand::Interact { actor, target });
+                }
+            }
+        }
+        let inactive = self.inactive.borrow();
         if self.physics.count() != 0 || self.scripts.is_some() {
             self.accumulated += frame;
             let requested = (self.accumulated / STEP) as usize;
             self.accumulated -= requested as f32 * STEP;
             for _ in 0..requested.min(MAX_STEPS) {
                 if let Some(scripts) = &mut self.scripts {
+                    scripts.tick = scripts.tick.saturating_add(1);
                     for mut object in self.objects.iter_mut(&mut self.world) {
                         object.run_script(
                             scripts,
@@ -1097,6 +1578,9 @@ impl Runtime {
                     }
                 }
                 for mut object in self.objects.iter_mut(&mut self.world) {
+                    if inactive.contains(&object.uuid) {
+                        continue;
+                    }
                     let spin = object.spin;
                     if let Some((body, Motion::Kinematic)) = object.body
                         && let Some(target) = &mut object.kinematic_target
@@ -1118,6 +1602,7 @@ impl Runtime {
                     {
                         for object in [event.first, event.second] {
                             if let Some(&source) = self.audio_sources.get(&object)
+                                && !inactive.contains(&object)
                                 && source.start == AudioStart::OnTriggerEnter
                                 && self.audio_cues.len() < MAX_AUDIO_CUES
                             {
@@ -1163,6 +1648,7 @@ impl Runtime {
                 .flatten()
             {
                 if let Some(&source) = self.audio_sources.get(&object)
+                    && !inactive.contains(&object)
                     && source.start == AudioStart::Manual
                     && self.audio_cues.len() < MAX_AUDIO_CUES
                 {
@@ -1171,9 +1657,16 @@ impl Runtime {
             }
         }
         let rotation = Quat::from_rotation_y(frame * 0.7);
+        let neutral = GameInput::default();
         for mut object in self.objects.iter_mut(&mut self.world) {
+            if inactive.contains(&object.uuid) {
+                continue;
+            }
             if let Some((animation, time)) = &mut object.animation {
                 *time += f64::from(frame * animation.speed);
+            }
+            if let Some(time) = &mut object.sprite_time {
+                *time += f64::from(frame);
             }
             if let Some(pose) = self
                 .range
@@ -1197,13 +1690,28 @@ impl Runtime {
                 );
             }
             let transform = object.transform;
-            if let Some(character) = &mut object.character {
+            let input = self
+                .player_inputs
+                .get(&object.uuid)
+                .map(AsRef::as_ref)
+                .or_else(|| {
+                    (self.player_inputs.is_empty() && self.primary_character == Some(object.uuid))
+                        .then_some(&self.input)
+                })
+                .unwrap_or(&neutral);
+            if self
+                .health
+                .borrow()
+                .get(&object.uuid)
+                .is_none_or(|state| state.alive())
+                && let Some(character) = &mut object.character
+            {
                 object.transform.translation = character.step(
                     &self.physics,
                     frame,
                     transform.translation,
-                    character::move_direction(&self.input, transform.rotation * Vec3::NEG_Z),
-                    self.input.action(InputAction::Jump).pressed,
+                    character.direction(input, transform.rotation * Vec3::NEG_Z),
+                    input.action(InputAction::Jump).pressed,
                 );
             }
         }
@@ -1245,11 +1753,236 @@ impl Runtime {
             .iter(&self.world)
             .filter_map(|object| object.animation.map(|animation| (object.uuid, animation)))
     }
+
+    pub fn animated_sprites(&mut self) -> impl Iterator<Item = (Uuid, f64)> + '_ {
+        self.objects
+            .iter(&self.world)
+            .filter_map(|object| object.sprite_time.map(|time| (object.uuid, time)))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_state_crosses_scene_start_and_checkpoints_restore_progress_and_pose() {
+        let mut first = Scene::default();
+        let player_id = first.entities[0].uuid;
+        first.entities[0].character = Some(CharacterController {
+            mode: CharacterMode::TopDown2d,
+            ..CharacterController::default()
+        });
+        let script = Uuid::new_v4();
+        first.assets.push(Asset {
+            id: script,
+            name: "Progress".into(),
+            kind: AssetKind::Script,
+        });
+        first.entities[0].script = Some(script);
+        first.script_sources.insert(
+            script,
+            r#"
+            fn on_start(entity) {
+                game_set("score", 7);
+                set_hud("score", game_get("score"));
+                save_checkpoint(entity);
+            }
+            fn on_update(entity, dt) {
+                if input_pressed("Interact") {
+                    game_set("score", 99);
+                    set_hud("score", 99);
+                    translate(entity, 3.0, 0.0, 0.0);
+                }
+                if input_pressed("Jump") { restore_checkpoint(entity); }
+            }
+        "#
+            .into(),
+        );
+        let mut runtime = Runtime::new(&first).unwrap();
+        runtime.start_scripts(&first, &HashMap::new());
+        runtime.prepare_play();
+        assert_eq!(runtime.game_state()["score"], ScriptValue::Number(7.0));
+        let press = |runtime: &mut Runtime, action: InputAction| {
+            let mut input = GameInput::default();
+            input.actions[action as usize].pressed = true;
+            runtime.game_input(input);
+            runtime.tick(STEP);
+            runtime.game_input(GameInput::default());
+            runtime.tick(STEP);
+        };
+        press(&mut runtime, InputAction::Interact);
+        assert_eq!(runtime.game_state()["score"], ScriptValue::Number(99.0));
+        assert_eq!(
+            runtime
+                .extract()
+                .find(|(id, _, _)| *id == player_id)
+                .unwrap()
+                .1
+                .translation
+                .x,
+            3.0
+        );
+        press(&mut runtime, InputAction::Jump);
+        assert_eq!(runtime.game_state()["score"], ScriptValue::Number(7.0));
+        assert_eq!(runtime.hud_value("score"), Some(ScriptValue::Number(7.0)));
+        assert_eq!(
+            runtime
+                .extract()
+                .find(|(id, _, _)| *id == player_id)
+                .unwrap()
+                .1
+                .translation
+                .x,
+            0.0
+        );
+
+        let mut next = first.clone();
+        next.script_sources.insert(
+            script,
+            "fn on_start(entity) { set_hud(\"entry\", game_get(\"score\")); }".into(),
+        );
+        let mut destination = Runtime::new(&next)
+            .unwrap()
+            .with_game_state(runtime.game_state().clone());
+        destination.start_scripts(&next, &HashMap::new());
+        destination.prepare_play();
+        assert_eq!(
+            destination.hud_value("entry"),
+            Some(ScriptValue::Number(7.0))
+        );
+    }
+
+    #[test]
+    fn named_timers_follow_fixed_ticks_and_each_instance_has_its_own_cooldown() {
+        let mut scene = Scene::default();
+        let id = Uuid::new_v4();
+        scene.assets.push(Asset {
+            id,
+            name: "Cooldown".into(),
+            kind: AssetKind::Script,
+        });
+        scene.script_sources.insert(
+            id,
+            r#"
+            fn fields() { #{ counter: "a" } }
+            fn on_start(entity) {
+                set_timer("round", 3);
+                set_timer("cancelled", 30);
+                cancel_timer("cancelled");
+                set_hud("cancelled", timer_remaining("cancelled"));
+                this.count = 0;
+                if try_cooldown("dash", 4) { this.count += 1; }
+                set_hud(param("counter"), this.count);
+            }
+            fn on_fixed_update(entity, dt) {
+                set_hud("round", timer_remaining("round"));
+                if try_cooldown("dash", 4) {
+                    this.count += 1;
+                    set_hud(param("counter"), this.count);
+                }
+            }
+        "#
+            .into(),
+        );
+        scene.entities[0].script = Some(id);
+        let mut other = Object::cube("Other".into(), Vec3::X);
+        other.script = Some(id);
+        other
+            .script_fields
+            .insert("counter".into(), ScriptValue::Text("b".into()));
+        scene.entities.push(other);
+        let mut runtime = Runtime::new(&scene).unwrap();
+        runtime.start_scripts(&scene, &HashMap::new());
+        runtime.prepare_play();
+        assert_eq!(runtime.hud_value("a"), Some(ScriptValue::Number(1.0)));
+        assert_eq!(runtime.hud_value("b"), Some(ScriptValue::Number(1.0)));
+        assert_eq!(
+            runtime.hud_value("cancelled"),
+            Some(ScriptValue::Number(0.0))
+        );
+        runtime.tick(STEP * 3.0);
+        runtime.tick(0.0);
+        assert_eq!(runtime.hud_value("round"), Some(ScriptValue::Number(0.0)));
+        assert_eq!(runtime.hud_value("a"), Some(ScriptValue::Number(1.0)));
+        runtime.tick(STEP);
+        runtime.tick(0.0);
+        assert_eq!(runtime.hud_value("a"), Some(ScriptValue::Number(2.0)));
+        assert_eq!(runtime.hud_value("b"), Some(ScriptValue::Number(2.0)));
+    }
+
+    #[test]
+    fn nearby_search_uses_world_positions_and_activation_controls_colliders() {
+        let mut scene = Scene::default();
+        let mut driver = Object::cube("Driver".into(), Vec3::ZERO);
+        let mut parent = Object::cube("Parent".into(), Vec3::X * 8.0);
+        parent.spin = false;
+        let mut near = Object::cube("Near".into(), Vec3::X * -7.0);
+        near.parent = Some(parent.uuid);
+        near.tags.push("pickup".into());
+        let mut far = Object::cube("Far".into(), Vec3::X * 0.1);
+        far.parent = Some(parent.uuid);
+        far.tags.push("pickup".into());
+        let mut block = Object::cube("Block".into(), Vec3::Z * -3.0);
+        block.tags.push("block".into());
+        block.body = Some(Body {
+            motion: Motion::Fixed,
+            ..Body::default()
+        });
+        let block_id = block.uuid;
+        let script = Uuid::new_v4();
+        driver.script = Some(script);
+        scene.assets.push(Asset {
+            id: script,
+            name: "Driver".into(),
+            kind: AssetKind::Script,
+        });
+        scene.script_sources.insert(
+            script,
+            r#"
+            fn on_start(entity) {
+                let hits = find_nearby(entity, "pickup", 2.0);
+                set_hud("nearby", hits.len);
+                this.block = find_tag("block");
+                set_active(this.block, false);
+            }
+            fn on_update(entity, dt) {
+                set_hud("hidden", find_tag("block") == ());
+                if input_pressed("Interact") { set_active(this.block, true); }
+            }
+        "#
+            .into(),
+        );
+        scene.entities = vec![driver, parent, near, far, block];
+        let mut runtime = Runtime::new(&scene).unwrap();
+        runtime.start_scripts(&scene, &HashMap::new());
+        runtime.prepare_play();
+        runtime.tick(STEP);
+        runtime.tick(STEP);
+        assert!(!runtime.is_active(block_id));
+        assert_eq!(runtime.hud_value("nearby"), Some(ScriptValue::Number(1.0)));
+        assert_eq!(runtime.hud_value("hidden"), Some(ScriptValue::Bool(true)));
+        assert!(
+            runtime
+                .raycast(Vec3::ZERO, Vec3::NEG_Z, 10.0, u32::MAX)
+                .is_none()
+        );
+
+        let mut input = GameInput::default();
+        input.actions[InputAction::Interact as usize].pressed = true;
+        runtime.game_input(input);
+        runtime.tick(STEP);
+        runtime.game_input(GameInput::default());
+        runtime.tick(STEP);
+        assert!(runtime.is_active(block_id));
+        assert_eq!(
+            runtime
+                .raycast(Vec3::ZERO, Vec3::NEG_Z, 10.0, u32::MAX)
+                .unwrap()
+                .entity,
+            block_id
+        );
+    }
 
     #[test]
     fn seeded_runs_assign_identical_ids_to_the_whole_spawned_branch() {
@@ -1821,6 +2554,7 @@ mod tests {
             texture,
             size: glam::Vec2::new(2.0, 1.0),
             billboard: Billboard::Upright,
+            sheet: None,
         };
         scene.entities[0].sprite = Some(sprite);
         assert!(scene.save(&path).is_err());

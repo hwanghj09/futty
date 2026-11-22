@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::{GameOutcome, Motion};
 
 type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
+pub(crate) type QueryPoses = HashMap<Uuid, (Option<Uuid>, Transform)>;
 pub const MAX_SCRIPT_BYTES: usize = 64 * 1024;
 pub type ScriptFields = BTreeMap<String, ScriptValue>;
 
@@ -162,9 +163,22 @@ pub(crate) enum WorldCommand {
         position: Vec3,
     },
     Despawn(Uuid),
+    SetActive(Uuid, bool),
+    Interact {
+        actor: Uuid,
+        target: Uuid,
+    },
     HudSet {
         name: String,
         value: ScriptValue,
+    },
+    GameSet(String, Option<ScriptValue>),
+    SaveCheckpoint(Uuid),
+    RestoreCheckpoint(Uuid),
+    HealthChange {
+        target: Uuid,
+        source: Uuid,
+        delta: f32,
     },
     LoadScene(String),
     FinishGame(GameOutcome),
@@ -183,8 +197,11 @@ struct Effects {
     entity: Option<Uuid>,
     motion: Option<Motion>,
     pose: Transform,
+    tick: u64,
+    timers: Rc<RefCell<BTreeMap<String, u64>>>,
     input: Rc<GameInput>,
     fields: Rc<ScriptFields>,
+    progress: Rc<ScriptFields>,
     physics: Commands,
     logs: Vec<String>,
 }
@@ -202,6 +219,7 @@ pub(crate) enum Callback {
     Update(f32),
     Fixed(f32),
     Event(&'static str, Uuid),
+    Health(&'static str, Uuid, f32),
     Message(Uuid, String),
 }
 
@@ -212,6 +230,7 @@ impl Callback {
             Self::Update(_) => "on_update",
             Self::Fixed(_) => "on_fixed_update",
             Self::Event(name, _) => name,
+            Self::Health(name, _, _) => name,
             Self::Message(_, _) => "on_message",
         }
     }
@@ -226,6 +245,7 @@ struct Program {
 struct Instance {
     fields: Rc<ScriptFields>,
     state: Dynamic,
+    timers: Rc<RefCell<BTreeMap<String, u64>>>,
 }
 
 pub(crate) struct Scripts {
@@ -234,9 +254,14 @@ pub(crate) struct Scripts {
     programs: HashMap<Uuid, (String, Result<Program, String>)>,
     instances: HashMap<Uuid, Instance>,
     disabled: HashSet<Uuid>,
+    pub(crate) tick: u64,
     pub(crate) log: VecDeque<String>,
     pub(crate) input: Rc<GameInput>,
+    pub(crate) player_inputs: HashMap<Uuid, Rc<GameInput>>,
+    pub(crate) progress: Rc<ScriptFields>,
     pub(crate) tags: Rc<RefCell<HashMap<String, Vec<Uuid>>>>,
+    pub(crate) inactive: Rc<RefCell<HashSet<Uuid>>>,
+    pub(crate) poses: Rc<RefCell<QueryPoses>>,
     pub(crate) prefabs: Rc<RefCell<HashMap<String, Uuid>>>,
     pub(crate) hud_clicks: Rc<RefCell<HashSet<String>>>,
     spawn_ids: Rc<RefCell<Option<SpawnIds>>>,
@@ -294,14 +319,14 @@ pub fn inspect_script(source: &str) -> Result<ScriptFields, String> {
 }
 
 pub fn inspect_script_diagnostic(source: &str) -> Result<ScriptFields, ScriptDiagnostic> {
-    let scripts = Scripts::new(None);
+    let scripts = Scripts::new(None, Default::default());
     scripts
         .build_program(source)
         .map(|program| program.defaults)
 }
 
 impl Scripts {
-    pub(crate) fn new(ids: Option<SpawnIds>) -> Self {
+    pub(crate) fn new(ids: Option<SpawnIds>, health: crate::health::HealthStates) -> Self {
         let effects = Rc::new(RefCell::new(Effects::default()));
         let spawn_ids = Rc::new(RefCell::new(ids));
         let allocate = spawn_ids.clone();
@@ -318,6 +343,80 @@ impl Scripts {
             .set_optimization_level(OptimizationLevel::None);
         engine.disable_symbol("eval");
         engine.register_type_with_name::<EntityRef>("Entity");
+        engine.register_fn("==", |first: EntityRef, second: EntityRef| {
+            first.0 == second.0
+        });
+        engine.register_fn("get_health", move |entity: EntityRef| -> Dynamic {
+            let states = health.borrow();
+            let Some(state) = states.get(&entity.0) else {
+                return Dynamic::UNIT;
+            };
+            Dynamic::from_map(Map::from([
+                ("current".into(), FLOAT::from(state.current).into()),
+                ("max".into(), FLOAT::from(state.max).into()),
+                (
+                    "fraction".into(),
+                    FLOAT::from(state.current / state.max).into(),
+                ),
+                ("alive".into(), state.alive().into()),
+            ]))
+        });
+        for (name, sign) in [("damage", -1.0), ("heal", 1.0)] {
+            let health = effects.clone();
+            engine.register_fn(
+                name,
+                move |target: EntityRef, amount: Dynamic| -> RhaiResult<()> {
+                    let amount = bounded(&amount, 1_000_000.0)?;
+                    if amount <= 0.0 {
+                        return Err("Health change amount must be positive".into());
+                    }
+                    let mut effects = health.borrow_mut();
+                    let source = effects
+                        .entity
+                        .ok_or("Health changes require an active entity")?;
+                    world_command(
+                        &mut effects,
+                        WorldCommand::HealthChange {
+                            target: target.0,
+                            source,
+                            delta: amount * sign,
+                        },
+                    )
+                },
+            );
+        }
+        let timer = effects.clone();
+        engine.register_fn(
+            "set_timer",
+            move |name: ImmutableString, ticks: rhai::INT| {
+                start_timer(&timer.borrow(), &name, ticks, false).map(|_| ())
+            },
+        );
+        let timer = effects.clone();
+        engine.register_fn(
+            "try_cooldown",
+            move |name: ImmutableString, ticks: rhai::INT| {
+                start_timer(&timer.borrow(), &name, ticks, true)
+            },
+        );
+        let timer = effects.clone();
+        engine.register_fn(
+            "timer_remaining",
+            move |name: ImmutableString| -> rhai::INT {
+                let timer = timer.borrow();
+                timer
+                    .timers
+                    .borrow()
+                    .get(name.as_str())
+                    .map_or(0, |deadline| {
+                        deadline.saturating_sub(timer.tick) as rhai::INT
+                    })
+            },
+        );
+        let timer = effects.clone();
+        engine.register_fn("cancel_timer", move |name: ImmutableString| {
+            timer.borrow().timers.borrow_mut().remove(name.as_str());
+        });
         let playback = effects.clone();
         engine.register_fn(
             "play_animation",
@@ -333,6 +432,8 @@ impl Scripts {
             },
         );
         let tags = Rc::<RefCell<HashMap<String, Vec<Uuid>>>>::default();
+        let inactive = Rc::<RefCell<HashSet<Uuid>>>::default();
+        let poses = Rc::<RefCell<QueryPoses>>::default();
         let prefabs = Rc::<RefCell<HashMap<String, Uuid>>>::default();
         let hud_clicks = Rc::<RefCell<HashSet<String>>>::default();
         let scene_effects = effects.clone();
@@ -350,6 +451,59 @@ impl Scripts {
             clicks.borrow().contains(name.as_str())
         });
         let values = effects.clone();
+        let progress = effects.clone();
+        engine.register_fn(
+            "game_set",
+            move |name: ImmutableString, value: Dynamic| -> RhaiResult<()> {
+                if !crate::hud::valid_binding(&name) {
+                    return Err("Expected a game state key of 1–64 bytes".into());
+                }
+                let value = if value.is_unit() {
+                    None
+                } else {
+                    Some(
+                        ScriptValue::from_dynamic(&value)
+                            .filter(ScriptValue::valid)
+                            .ok_or("Game state values must be finite numbers, booleans or text")?,
+                    )
+                };
+                world_command(
+                    &mut progress.borrow_mut(),
+                    WorldCommand::GameSet(name.to_string(), value),
+                )
+            },
+        );
+        let progress = effects.clone();
+        engine.register_fn("game_get", move |name: ImmutableString| -> Dynamic {
+            let effects = progress.borrow();
+            for command in effects.physics.world.iter().rev() {
+                if let WorldCommand::GameSet(key, value) = command
+                    && key == name.as_str()
+                {
+                    return value
+                        .as_ref()
+                        .map_or(Dynamic::UNIT, ScriptValue::to_dynamic);
+                }
+            }
+            effects
+                .progress
+                .get(name.as_str())
+                .map_or(Dynamic::UNIT, ScriptValue::to_dynamic)
+        });
+        let checkpoint = effects.clone();
+        engine.register_fn("save_checkpoint", move |player: EntityRef| {
+            world_command(
+                &mut checkpoint.borrow_mut(),
+                WorldCommand::SaveCheckpoint(player.0),
+            )
+        });
+        let checkpoint = effects.clone();
+        engine.register_fn("restore_checkpoint", move |player: EntityRef| {
+            world_command(
+                &mut checkpoint.borrow_mut(),
+                WorldCommand::RestoreCheckpoint(player.0),
+            )
+        });
         let finish = effects.clone();
         engine.register_fn(
             "finish_game",
@@ -381,14 +535,16 @@ impl Scripts {
             },
         );
         let lookup = tags.clone();
+        let hidden = inactive.clone();
         engine.register_fn("find_tag", move |tag: ImmutableString| -> Dynamic {
             lookup
                 .borrow()
                 .get(tag.as_str())
-                .and_then(|ids| ids.first())
+                .and_then(|ids| ids.iter().find(|id| !hidden.borrow().contains(id)))
                 .map_or(Dynamic::UNIT, |&id| Dynamic::from(EntityRef(id)))
         });
         let lookup = tags.clone();
+        let hidden = inactive.clone();
         engine.register_fn(
             "find_all_tagged",
             move |tag: ImmutableString| -> rhai::Array {
@@ -397,9 +553,59 @@ impl Scripts {
                     .get(tag.as_str())
                     .into_iter()
                     .flatten()
+                    .filter(|id| !hidden.borrow().contains(id))
                     .take(128)
                     .map(|&id| Dynamic::from(EntityRef(id)))
                     .collect()
+            },
+        );
+        let lookup = tags.clone();
+        let hidden = inactive.clone();
+        let positions = poses.clone();
+        engine.register_fn(
+            "find_nearby",
+            move |origin: EntityRef,
+                  tag: ImmutableString,
+                  radius: Dynamic|
+                  -> RhaiResult<rhai::Array> {
+                let radius = bounded(&radius, 10_000.0)?;
+                if radius < 0.0 {
+                    return Err("The search radius must be non-negative".into());
+                }
+                let positions = positions.borrow();
+                let hidden = hidden.borrow();
+                let Some(center) =
+                    world_position(&positions, origin.0).filter(|_| !hidden.contains(&origin.0))
+                else {
+                    return Ok(Vec::new());
+                };
+                let tags = lookup.borrow();
+                let mut matches: Vec<_> = tags
+                    .get(tag.as_str())
+                    .into_iter()
+                    .flatten()
+                    .filter(|&&id| id != origin.0 && !hidden.contains(&id))
+                    .filter_map(|&id| {
+                        let distance = center.distance_squared(world_position(&positions, id)?);
+                        (distance <= radius * radius).then_some((distance, id))
+                    })
+                    .collect();
+                matches.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+                Ok(matches
+                    .into_iter()
+                    .take(128)
+                    .map(|(_, id)| Dynamic::from(EntityRef(id)))
+                    .collect())
+            },
+        );
+        let activation = effects.clone();
+        engine.register_fn(
+            "set_active",
+            move |target: EntityRef, active: bool| -> RhaiResult<()> {
+                world_command(
+                    &mut activation.borrow_mut(),
+                    WorldCommand::SetActive(target.0, active),
+                )
             },
         );
         let messages = effects.clone();
@@ -561,9 +767,14 @@ impl Scripts {
             programs: HashMap::new(),
             instances: HashMap::new(),
             disabled: HashSet::new(),
+            tick: 0,
             log: VecDeque::new(),
             input: Rc::default(),
+            player_inputs: HashMap::new(),
+            progress: Rc::default(),
             tags,
+            inactive,
+            poses,
             prefabs,
             hud_clicks,
             spawn_ids,
@@ -656,11 +867,14 @@ impl Scripts {
             Instance {
                 fields: Rc::new(fields),
                 state: Dynamic::from_map(Map::new()),
+                timers: Rc::default(),
             },
         );
     }
 
     pub(crate) fn forget(&mut self, object: Uuid) {
+        self.inactive.borrow_mut().remove(&object);
+        self.poses.borrow_mut().remove(&object);
         self.instances.remove(&object);
         self.disabled.remove(&object);
         self.tags.borrow_mut().retain(|_, ids| {
@@ -702,8 +916,11 @@ impl Scripts {
             entity: Some(id),
             motion,
             pose: *transform,
-            input: self.input.clone(),
+            input: self.player_inputs.get(&id).unwrap_or(&self.input).clone(),
             fields: instance.fields.clone(),
+            progress: self.progress.clone(),
+            tick: self.tick,
+            timers: instance.timers.clone(),
             ..Default::default()
         };
         let mut state = instance.state.clone();
@@ -735,6 +952,13 @@ impl Scripts {
                 &program.ast,
                 function,
                 (entity, EntityRef(other)),
+            ),
+            Callback::Health(_, source, amount) => self.engine.call_fn_with_options::<Dynamic>(
+                options,
+                &mut scope,
+                &program.ast,
+                function,
+                (entity, EntityRef(source), FLOAT::from(amount)),
             ),
             Callback::Message(sender, name) => self.engine.call_fn_with_options::<Dynamic>(
                 options,
@@ -874,6 +1098,41 @@ fn numeric(value: &Dynamic) -> RhaiResult<f64> {
         .as_float()
         .or_else(|_| value.as_int().map(|value| value as f64))
         .map_err(|_| "Expected a number".into())
+}
+
+fn start_timer(
+    effects: &Effects,
+    name: &str,
+    ticks: rhai::INT,
+    cooldown: bool,
+) -> RhaiResult<bool> {
+    if effects.entity.is_none()
+        || !crate::hud::valid_binding(name)
+        || !(1..=216_000).contains(&ticks)
+    {
+        return Err("Expected a timer name and 1–216000 ticks in an entity callback".into());
+    }
+    let mut timers = effects.timers.borrow_mut();
+    timers.retain(|_, deadline| *deadline > effects.tick);
+    if cooldown && timers.contains_key(name) {
+        return Ok(false);
+    }
+    if timers.len() >= 32 && !timers.contains_key(name) {
+        return Err("An entity can have up to 32 active timers".into());
+    }
+    timers.insert(name.to_owned(), effects.tick.saturating_add(ticks as u64));
+    Ok(true)
+}
+
+pub(crate) fn world_position(poses: &QueryPoses, id: Uuid) -> Option<Vec3> {
+    let &(mut parent, local) = poses.get(&id)?;
+    let mut point = local.translation;
+    while let Some(id) = parent {
+        let &(next, transform) = poses.get(&id)?;
+        point = transform.matrix().transform_point3(point);
+        parent = next;
+    }
+    point.is_finite().then_some(point)
 }
 
 fn bounded(value: &Dynamic, limit: f32) -> RhaiResult<f32> {

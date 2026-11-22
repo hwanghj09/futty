@@ -1,8 +1,19 @@
 use eframe::egui::{self, Event, Key, PointerButton};
-use futty_runtime::{ActionState, GameInput, InputAction, InputProfile};
+use futty_runtime::{ActionState, GameInput, InputAction, InputProfile, Scene};
 use serde::{Deserialize, Serialize};
 
 const STORAGE_KEY: &str = "futty.game-input.v1";
+const PLAYER_TWO: [Key; InputAction::ALL.len()] = [
+    Key::ArrowUp,
+    Key::ArrowDown,
+    Key::ArrowLeft,
+    Key::ArrowRight,
+    Key::K,
+    Key::L,
+    Key::O,
+    Key::P,
+    Key::J,
+];
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Binding {
@@ -70,6 +81,20 @@ impl Default for InputSettings {
 }
 
 impl InputSettings {
+    pub(crate) fn aim_character(
+        ctx: &egui::Context,
+        runtime: &mut futty_runtime::Runtime,
+        player: Option<uuid::Uuid>,
+        input: &GameInput,
+    ) {
+        if input.mouse_delta != glam::Vec2::ZERO
+            && ctx.input(|state| state.pointer.secondary_down())
+            && let Some(id) = player
+        {
+            runtime.look_character(id, input.mouse_delta.x * 0.12, -input.mouse_delta.y * 0.12);
+        }
+    }
+
     pub(crate) fn with_profile(&self, profile: &InputProfile) -> Self {
         let mut settings = *self;
         for action in InputAction::ALL {
@@ -100,14 +125,23 @@ impl InputSettings {
         self.bindings[action as usize].label()
     }
 
-    pub(crate) fn sample(&self, input: &egui::InputState, mouse: bool) -> GameInput {
+    pub(crate) fn sample(
+        &self,
+        input: &egui::InputState,
+        mouse: bool,
+        reserve_second: bool,
+    ) -> GameInput {
         let [forward, backward, left, right] = [
             InputAction::MoveForward,
             InputAction::MoveBackward,
             InputAction::MoveLeft,
             InputAction::MoveRight,
         ];
-        let actions = self.bindings.map(|binding| binding.read(input, mouse));
+        let available = |key| !reserve_second || !PLAYER_TWO.contains(&key);
+        let actions = self.bindings.map(|binding| match binding {
+            Binding::Key(key) if !available(key) => ActionState::default(),
+            _ => binding.read(input, mouse),
+        });
         let delta = if mouse {
             input
                 .pointer
@@ -124,13 +158,24 @@ impl InputSettings {
             held: Key::ALL
                 .iter()
                 .copied()
-                .filter(|key| input.key_down(*key))
+                .filter(|&key| available(key) && input.key_down(key))
                 .map(Key::name)
                 .collect(),
             actions,
             mouse_delta: glam::vec2(delta.x, delta.y) * self.sensitivity,
             ..Default::default()
         }
+    }
+
+    pub(crate) fn sample_player_two(input: &egui::InputState) -> GameInput {
+        let settings = Self {
+            bindings: PLAYER_TWO.map(Binding::Key),
+            sensitivity: 1.0,
+        };
+        let mut game = settings.sample(input, false, false);
+        game.held
+            .retain(|name| PLAYER_TWO.iter().any(|key| key.name() == *name));
+        game
     }
 
     pub(crate) fn toggle_shortcut(ctx: &egui::Context, open: &mut bool) {
@@ -142,12 +187,32 @@ impl InputSettings {
         }
     }
 
-    pub(crate) fn window(&mut self, ctx: &egui::Context, open: &mut bool, profile: &InputProfile) {
+    pub(crate) fn window(
+        &mut self,
+        ctx: &egui::Context,
+        open: &mut bool,
+        scene: &Scene,
+        editable: bool,
+    ) -> bool {
+        let profile = &scene.input;
+        let mut coop = scene.local_coop;
+        let player_two = scene.local_player_two();
         egui::Window::new("Game Controls")
             .open(open)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
+                if editable && scene.training_range.is_none() {
+                    ui.checkbox(&mut coop, "Two-player local co-op");
+                }
+                if let Some(index) = player_two {
+                    ui.label(format!("Player 2 · {}", scene.entities[index].name));
+                    ui.label("Arrows move · K jump · L fire · O reload · P interact · J retry");
+                    ui.label("Player 2 keys take priority over Player 1 bindings.");
+                    ui.separator();
+                } else if coop && scene.training_range.is_none() {
+                    ui.label("Add two character controllers to play co-op.");
+                }
                 egui::Grid::new("game-bindings")
                     .num_columns(2)
                     .show(ui, |ui| {
@@ -204,12 +269,106 @@ impl InputSettings {
                     *self = Self::default();
                 }
             });
+        coop
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn co_op_keyboard_input_moves_both_players_and_routes_interaction_to_the_actor() {
+        use futty_core::{Asset, AssetKind};
+        use futty_runtime::{
+            CharacterController, CharacterMode, Health, Interaction, Object, Runtime, ScriptValue,
+        };
+        use glam::Vec3;
+
+        let mut scene = Scene::default();
+        scene.local_coop = true;
+        let character = |name: &str, x| {
+            let mut object = Object::cube(name.into(), Vec3::X * x);
+            object.character = Some(CharacterController {
+                mode: CharacterMode::TopDown2d,
+                ..CharacterController::default()
+            });
+            object.health = Some(Health::default());
+            object
+        };
+        let first = character("First", 0.0);
+        let mut second = character("Second", 4.0);
+        second.tags.push("second".into());
+        let idle = character("Idle", 8.0);
+        let ids = [first.uuid, second.uuid, idle.uuid];
+        let mut switch = Object::cube("Switch".into(), Vec3::new(4.0, 0.5, 0.0));
+        switch.interaction = Some(Interaction::default());
+        let script = uuid::Uuid::new_v4();
+        switch.script = Some(script);
+        scene.assets.push(Asset {
+            id: script,
+            kind: AssetKind::Script,
+            name: "Switch".into(),
+        });
+        scene.script_sources.insert(
+            script,
+            r#"fn on_interact(entity, actor) {
+                if actor == find_tag("second") { damage(actor, 25); }
+            }"#
+            .into(),
+        );
+        scene.entities = vec![first, second, idle, switch];
+        assert_eq!(scene.local_player_two(), Some(1));
+        let mut runtime = Runtime::new(&scene).unwrap();
+        runtime.start_scripts(&scene, &Default::default());
+        runtime.prepare_play();
+        let mut settings = InputSettings::default();
+        settings.bindings[InputAction::MoveRight as usize] = Binding::Key(Key::ArrowRight);
+        let ctx = egui::Context::default();
+        let events = [Key::W, Key::ArrowRight, Key::P].map(|key| Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        ctx.run_ui(
+            egui::RawInput {
+                events: events.into(),
+                ..Default::default()
+            },
+            |ui| {
+                ui.input(|input| {
+                    let first = settings.sample(input, false, true);
+                    let second = InputSettings::sample_player_two(input);
+                    assert!(!first.right && !first.held.contains(&"P"));
+                    assert!(second.right && !second.held.contains(&"W"));
+                    runtime.local_game_input(first, second);
+                    runtime.tick(0.1);
+                });
+            },
+        )
+        .textures_delta
+        .clear();
+        runtime.local_game_input(GameInput::default(), GameInput::default());
+        runtime.tick(1.0 / 60.0);
+        runtime.tick(1.0 / 60.0);
+        let positions: std::collections::HashMap<_, _> = runtime
+            .extract()
+            .map(|(id, transform, _)| (id, transform.translation))
+            .collect();
+        assert!(positions[&ids[0]].y > 0.4);
+        assert!(positions[&ids[1]].x > 4.4);
+        assert_eq!(positions[&ids[2]], Vec3::X * 8.0);
+        assert_eq!(
+            runtime.hud_value("player.health"),
+            Some(ScriptValue::Number(1.0))
+        );
+        assert_eq!(
+            runtime.hud_value("player2.health"),
+            Some(ScriptValue::Number(0.75))
+        );
+    }
 
     #[test]
     fn scene_profile_maps_key_and_keeps_unspecified_player_settings() {
@@ -237,7 +396,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                let input = ui.input(|raw| effective.sample(raw, false));
+                let input = ui.input(|raw| effective.sample(raw, false, false));
                 assert!(input.forward);
                 assert!(input.action(InputAction::MoveForward).pressed);
             },
@@ -279,7 +438,7 @@ mod tests {
                 Event::MouseMoved(egui::vec2(3.0, -2.0)),
             ]),
             |ui| {
-                let game = ui.input(|input| settings.sample(input, true));
+                let game = ui.input(|input| settings.sample(input, true, false));
                 assert_eq!(
                     game.action(InputAction::MoveForward),
                     ActionState {
@@ -302,7 +461,7 @@ mod tests {
         .textures_delta
         .clear();
         ctx.run_ui(frame(vec![]), |ui| {
-            let game = ui.input(|input| settings.sample(input, true));
+            let game = ui.input(|input| settings.sample(input, true, false));
             assert_eq!(
                 game.action(InputAction::MoveForward),
                 ActionState {
@@ -314,7 +473,7 @@ mod tests {
         .textures_delta
         .clear();
         ctx.run_ui(frame(vec![key(false)]), |ui| {
-            let game = ui.input(|input| settings.sample(input, true));
+            let game = ui.input(|input| settings.sample(input, true, false));
             assert_eq!(
                 game.action(InputAction::MoveForward),
                 ActionState {

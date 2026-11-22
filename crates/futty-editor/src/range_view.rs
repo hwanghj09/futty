@@ -34,7 +34,8 @@ impl RangeControls {
         is_range: bool,
         settings: &InputSettings,
         hud_blocks_mouse: bool,
-    ) -> (f32, GameInput) {
+        player_two: bool,
+    ) -> (f32, GameInput, GameInput) {
         if self.grabbed
             && (!is_range
                 || game.is_none()
@@ -54,6 +55,7 @@ impl RangeControls {
                         .is_some_and(|pos| rect.contains(pos))
                 });
             let mut keys = GameInput::default();
+            let mut second = GameInput::default();
             if game.is_some()
                 && active
                 && input.focused
@@ -61,7 +63,10 @@ impl RangeControls {
                 && !editing_text
                 && (mouse || !input.pointer.secondary_down())
             {
-                keys = settings.sample(input, mouse && !fresh && !hud_blocks_mouse);
+                keys = settings.sample(input, mouse && !fresh && !hud_blocks_mouse, player_two);
+                if player_two {
+                    second = InputSettings::sample_player_two(input);
+                }
             }
             if self.grabbed {
                 let fire = keys.action(InputAction::Fire);
@@ -73,7 +78,7 @@ impl RangeControls {
                     retry: keys.action(InputAction::Retry).pressed,
                 };
             }
-            (input.stable_dt, keys)
+            (input.stable_dt, keys, second)
         })
     }
 

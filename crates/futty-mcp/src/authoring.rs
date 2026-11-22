@@ -53,6 +53,8 @@ impl ObjectQuery {
                     "shape": object.primitive,
                     "mesh": object.mesh,
                     "texture": object.texture,
+                    "sprite": object.sprite,
+                    "camera_follow": object.camera_follow,
                     "material": object.material,
                     "script": object.script,
                     "audio_source": object.audio_source,
@@ -60,6 +62,8 @@ impl ObjectQuery {
                     "camera": object.camera,
                     "light": object.light,
                     "character": object.character,
+                    "interaction": object.interaction,
+                    "health": object.health,
                     "prefab": object.prefab,
                 })
             })
@@ -97,6 +101,20 @@ pub(crate) struct Batch {
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
+    /// Enable or disable shared-screen local keyboard co-op.
+    SetLocalCoop {
+        enabled: bool,
+    },
+    /// Generate a connected 2D maze with fixed walls, a top-down player, and a goal marker.
+    GenerateMaze2d {
+        start_key: String,
+        goal_key: String,
+        layout: crate::layout::Maze2d,
+    },
+    /// Paint an atlas grid into a scene as editable sprites with optional fixed colliders.
+    PaintTilemap2d {
+        map: crate::layout::Tilemap2d,
+    },
     AddObject {
         /// Key for later operations in this batch.
         key: String,
@@ -110,6 +128,8 @@ enum Operation {
         name: String,
         position: [f32; 3],
         target: [f32; 3],
+        /// Set an orthographic camera's vertical half-size in world units.
+        orthographic_size: Option<f32>,
         /// Add a player capsule driven by the existing movement actions.
         #[serde(default)]
         character: bool,
@@ -157,6 +177,32 @@ enum Operation {
         #[schemars(with = "Option<String>")]
         material_id: Option<Uuid>,
     },
+    SetSprite {
+        object: String,
+        #[schemars(with = "String")]
+        texture_id: Uuid,
+        /// Width and height in world units.
+        size: Option<[f32; 2]>,
+        /// Fixed, FaceCamera or Upright. Defaults to Fixed on a new sprite.
+        #[schemars(with = "Option<String>")]
+        billboard: Option<futty_runtime::Billboard>,
+    },
+    SetSpriteSheet {
+        object: String,
+        /// Omit or use null to show the entire texture.
+        sheet: Option<SpriteSheetSettings>,
+    },
+    SetCameraFollow {
+        object: String,
+        /// Target scene tag. Omit or use null to disable following.
+        tag: Option<String>,
+        /// World-space X and Y offsets, defaulting to zero.
+        offset: Option<[f32; 2]>,
+        /// Enable X and Y following, defaulting to both axes.
+        axes: Option<[bool; 2]>,
+        /// Optional camera center bounds, as [minimum XY, maximum XY].
+        bounds: Option<[[f32; 2]; 2]>,
+    },
     SetScript {
         object: String,
         name: String,
@@ -174,6 +220,18 @@ enum Operation {
         offset: [f32; 2],
         size: [f32; 2],
     },
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SpriteSheetSettings {
+    columns: u16,
+    rows: u16,
+    /// Zero-based cell index, in row-major order.
+    first_frame: u16,
+    frames: u16,
+    fps: f32,
+    looping: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -287,6 +345,22 @@ fn apply_edit(
     keys: &mut BTreeMap<String, Uuid>,
 ) -> Result<(), ErrorData> {
     match edit {
+        Operation::PaintTilemap2d { map } => {
+            let tiles = map.build(scene)?;
+            scene.entities.extend(tiles);
+        }
+        Operation::SetLocalCoop { enabled } => scene.local_coop = enabled,
+        Operation::GenerateMaze2d {
+            start_key,
+            goal_key,
+            layout,
+        } => {
+            let (start, goal, walls) = layout.build()?;
+            register(keys, start_key, start.uuid)?;
+            register(keys, goal_key, goal.uuid)?;
+            scene.entities.extend([start, goal]);
+            scene.entities.extend(walls);
+        }
         Operation::AddObject {
             key,
             name,
@@ -312,9 +386,11 @@ fn apply_edit(
             name,
             position,
             target,
+            orthographic_size,
             character,
         } => {
             let mut object = camera_object(name, position, target)?;
+            crate::set_orthographic(&mut object, orthographic_size)?;
             object.character = character.then(CharacterController::default);
             register(keys, key, object.uuid)?;
             if scene.camera_index(None).is_none() {
@@ -437,6 +513,88 @@ fn apply_edit(
                 return Err(invalid("Shared materials require a 3D renderable object"));
             }
             object.material = material_id;
+        }
+        Operation::SetSprite {
+            object,
+            texture_id,
+            size,
+            billboard,
+        } => {
+            let index = object_index(&object, scene, keys)?;
+            if !scene
+                .assets
+                .iter()
+                .any(|asset| asset.id == texture_id && asset.kind == AssetKind::Texture)
+            {
+                return Err(invalid("Sprite3D requires a registered PNG texture"));
+            }
+            let object = &mut scene.entities[index];
+            if !object.has_renderer()
+                || object.mesh.is_some()
+                || object.material.is_some()
+                || object.prefab.is_some()
+            {
+                return Err(invalid(
+                    "Choose a primitive object or the source of an existing Sprite3D",
+                ));
+            }
+            let current = object.sprite.unwrap_or(futty_runtime::Sprite {
+                texture: texture_id,
+                size: Vec2::ONE,
+                billboard: futty_runtime::Billboard::Fixed,
+                sheet: None,
+            });
+            object.sprite = Some(futty_runtime::Sprite {
+                texture: texture_id,
+                size: size.map_or(current.size, Into::into),
+                billboard: billboard.unwrap_or(current.billboard),
+                sheet: current.sheet,
+            });
+        }
+        Operation::SetSpriteSheet { object, sheet } => {
+            let index = object_index(&object, scene, keys)?;
+            let object = &mut scene.entities[index];
+            if object.prefab.is_some() {
+                return Err(invalid("Edit the prefab source to change its sprite sheet"));
+            }
+            let sprite = object
+                .sprite
+                .as_mut()
+                .ok_or_else(|| invalid("Set a sprite first"))?;
+            sprite.sheet = sheet.map(|sheet| futty_runtime::SpriteSheet {
+                columns: sheet.columns,
+                rows: sheet.rows,
+                first_frame: sheet.first_frame,
+                frames: sheet.frames,
+                fps: sheet.fps,
+                looping: sheet.looping,
+            });
+        }
+        Operation::SetCameraFollow {
+            object,
+            tag,
+            offset,
+            axes,
+            bounds,
+        } => {
+            let index = object_index(&object, scene, keys)?;
+            let object = &mut scene.entities[index];
+            if object.prefab.is_some() {
+                return Err(invalid("Edit the prefab source to change camera follow"));
+            }
+            if tag.is_some()
+                && object
+                    .camera
+                    .is_none_or(|lens| lens.projection != futty_core::Projection::Orthographic)
+            {
+                return Err(invalid("Camera follow requires an orthographic camera"));
+            }
+            object.camera_follow = tag.map(|tag| futty_runtime::CameraFollow2d {
+                tag,
+                offset: offset.unwrap_or([0.0; 2]),
+                axes: axes.unwrap_or([true; 2]),
+                bounds,
+            });
         }
         Operation::SetScript {
             object,

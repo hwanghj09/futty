@@ -192,6 +192,36 @@ pub(crate) fn paint(
             }
         }
     }
+    let second = scene.local_player_two();
+    if let Some(runtime) = runtime {
+        let players = [scene.player_index(), second];
+        let painter = ui
+            .painter()
+            .with_clip_rect(canvas.intersect(ui.clip_rect()));
+        for (slot, index) in players.into_iter().enumerate() {
+            let Some((_, mut prompt)) = index
+                .and_then(|index| runtime.interaction_focus(scene.entities[index].uuid))
+                .filter(|(_, prompt)| !prompt.is_empty())
+            else {
+                continue;
+            };
+            if second.is_some() {
+                prompt = format!("P{} · {prompt}", slot + 1);
+            }
+            let label =
+                painter.layout_no_wrap(prompt, FontId::monospace(15.0 * unit), Color32::WHITE);
+            let position = Pos2::new(
+                canvas.center().x - label.size().x * 0.5,
+                canvas.center().y + (28.0 + 30.0 * slot as f32) * unit,
+            );
+            painter.rect_filled(
+                Rect::from_min_size(position, label.size()).expand(7.0 * unit),
+                4.0 * unit,
+                PANEL,
+            );
+            painter.galley(position, label, Color32::WHITE);
+        }
+    }
 }
 
 impl Editor {

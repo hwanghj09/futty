@@ -386,7 +386,12 @@ impl Editor {
                 .as_ref()
                 .ok_or("Open a Futty project to switch scenes")?;
             let path = project.resolve(id)?;
-            player::GameScene::load(&path, ctx, self.viewport.gpu(), Camera::default())
+            let state = self
+                .play
+                .as_ref()
+                .map(|play| play.runtime().game_state().clone())
+                .unwrap_or_default();
+            player::GameScene::load(&path, ctx, self.viewport.gpu(), Camera::default(), state)
         })();
         match result {
             Ok(world) => {
@@ -2001,13 +2006,18 @@ impl eframe::App for Editor {
             };
             let hud_blocks_mouse = self.range_controls.cursor_free()
                 && game.is_some_and(|rect| hud_view::over_button(&ctx, rect, &scene.hud));
-            let (dt, keys) = self.range_controls.input(
+            let (dt, keys, second) = self.range_controls.input(
                 &ctx,
                 game,
                 is_range,
                 &self.input_settings.with_profile(&scene.input),
                 hud_blocks_mouse,
+                scene.local_player_two().is_some(),
             );
+            let player = scene
+                .camera_index(None)
+                .filter(|_| !is_range)
+                .map(|index| scene.entities[index].uuid);
             if let Some(play) = &mut self.play {
                 let (runtime, audio) = match play {
                     Play::Edited { runtime, .. } => (runtime.as_mut(), &mut self.audio),
@@ -2016,7 +2026,8 @@ impl eframe::App for Editor {
                         (&mut world.runtime, &mut world.audio)
                     }
                 };
-                runtime.game_input(keys);
+                input::InputSettings::aim_character(&ctx, runtime, player, &keys);
+                runtime.local_game_input(keys, second);
                 runtime.tick(dt);
                 audio_issue = audio_issue.or(audio::pump(audio, runtime));
                 if let Some(id) = runtime.take_scene_request() {
@@ -2101,12 +2112,19 @@ impl eframe::App for Editor {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BACKGROUND))
             .show(ui, |ui| self.dock_workspace(ui, &mut action, modal));
-        let profile = match &self.play {
-            Some(Play::Loaded(world)) => &world.scene.input,
-            _ => &self.doc.scene.input,
+        let controls_scene = match &self.play {
+            Some(Play::Loaded(world)) => &world.scene,
+            _ => &self.doc.scene,
         };
-        self.input_settings
-            .window(&ctx, &mut self.controls_open, profile);
+        let coop = self.input_settings.window(
+            &ctx,
+            &mut self.controls_open,
+            controls_scene,
+            self.play.is_none(),
+        );
+        if self.play.is_none() {
+            self.doc.scene.local_coop = coop;
+        }
         self.hud_window(&ctx);
         self.doc.record_frame(
             before,

@@ -96,7 +96,10 @@ fn shadow_visibility(world: vec3<f32>, lambert: f32) -> f32 {
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let sprite = in.material.a > 3.5;
     let texel_edge = vec2<f32>(0.5) / vec2<f32>(textureDimensions(base_color, 0));
-    let uv = select(in.uv, clamp(in.uv, texel_edge, 1.0 - texel_edge), sprite);
+    // Sprites reuse the surface parameters for their atlas rectangle.
+    let inset = min(texel_edge, in.surface.zw * 0.5);
+    let sprite_uv = in.surface.xy + clamp(in.uv * in.surface.zw, inset, in.surface.zw - inset);
+    let uv = select(in.uv, sprite_uv, sprite);
     let texel = textureSample(base_color, base_sampler, uv);
     if sprite {
         let color = linear_to_srgb(in.material.rgb * texel.rgb);

@@ -275,6 +275,10 @@ impl Physics {
         self.world.remove_body(body);
     }
 
+    pub(crate) fn set_enabled(&mut self, body: RigidBodyHandle, enabled: bool) {
+        self.world.bodies[body].set_enabled(enabled);
+    }
+
     pub(crate) fn events(&self) -> &VecDeque<PhysicsEvent> {
         &self.events
     }

@@ -130,7 +130,8 @@ pub struct DrawObject {
     pub mesh: Option<Uuid>,
     pub primitive: Primitive,
     pub texture: Option<Uuid>,
-    pub sprite: bool,
+    /// Sprite UV rectangle as [left, top, width, height].
+    pub sprite: Option<[f32; 4]>,
     pub surface: Surface,
     pub material_override: bool,
     pub animation: Option<AnimationSample>,
@@ -672,7 +673,7 @@ impl Renderer {
         for (index, object) in objects
             .iter()
             .enumerate()
-            .filter(|(_, object)| !object.sprite && object.matrix.is_finite())
+            .filter(|(_, object)| object.sprite.is_none() && object.matrix.is_finite())
         {
             let replacement = object
                 .texture
@@ -739,15 +740,15 @@ impl Renderer {
         let first_sprite = draws.len();
         let mut sprites: Vec<_> = objects
             .iter()
-            .filter(|object| object.sprite && object.matrix.is_finite())
-            .map(|object| {
+            .filter_map(|object| {
+                let uv = object.sprite.filter(|_| object.matrix.is_finite())?;
                 let center = view_projection * object.matrix.w_axis;
-                (center.z / center.w, object)
+                Some((center.z / center.w, object, uv))
             })
             .collect();
         // shortcut: intersecting sprites sort by center depth, revisit if scenes need per-pixel ordering.
         sprites.sort_by(|a, b| b.0.total_cmp(&a.0));
-        for (_, object) in sprites {
+        for (_, object, uv) in sprites {
             let texture = object
                 .texture
                 .and_then(|id| self.textures.get(&id))
@@ -757,12 +758,16 @@ impl Renderer {
             } else {
                 [0.25, 0.18, 0.12]
             };
-            instances.push(Instance::new(
-                object.matrix,
-                color,
-                if object.selected { 5.0 } else { 4.0 },
-                object.surface,
-            ));
+            instances.push(Instance {
+                model: object.matrix.to_cols_array_2d(),
+                color: [
+                    color[0],
+                    color[1],
+                    color[2],
+                    if object.selected { 5.0 } else { 4.0 },
+                ],
+                surface: uv,
+            });
             draws.push(Draw {
                 buffers: &self.quad,
                 indices: 0..6,
@@ -1018,7 +1023,7 @@ mod tests {
             selected: false,
             mesh: None,
             texture: None,
-            sprite: false,
+            sprite: None,
             primitive: Primitive::Cube,
             surface: Surface::default(),
             material_override: true,
@@ -1053,7 +1058,7 @@ mod tests {
             selected: false,
             mesh: None,
             texture: None,
-            sprite: false,
+            sprite: None,
             primitive: Primitive::Cube,
             surface: Surface::default(),
             material_override: true,
@@ -1127,7 +1132,7 @@ mod tests {
             selected: false,
             mesh: None,
             texture: None,
-            sprite: false,
+            sprite: None,
             primitive: Primitive::Cube,
         };
         let mut sampled = |lights: &[LightInstance]| {
@@ -1199,7 +1204,7 @@ mod tests {
             selected: false,
             mesh: None,
             texture: None,
-            sprite: false,
+            sprite: None,
             primitive,
         };
         let objects = [
@@ -1281,7 +1286,7 @@ mod tests {
             selected: false,
             mesh: None,
             texture: Some(texture),
-            sprite: true,
+            sprite: Some([0.0, 0.0, 1.0, 1.0]),
             primitive: Primitive::Cube,
         };
         renderer.draw(&device, &queue, &targets, default_scene(camera, &[]));
@@ -1311,7 +1316,7 @@ mod tests {
             selected: false,
             mesh: None,
             texture: None,
-            sprite: false,
+            sprite: None,
             primitive: Primitive::Cube,
         };
         renderer.draw(
@@ -1360,7 +1365,7 @@ mod tests {
             selected: false,
             mesh: Some(model_id),
             texture: None,
-            sprite: false,
+            sprite: None,
             primitive: Primitive::Cube,
         };
         let camera = Camera::default().view_projection(1.0);

@@ -234,6 +234,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Cli
 - `project_validate`는 프로젝트 파일의 `path`를 받아 시작 씬 설정과 등록된 씬을 검사합니다. 씬별로 구조 오류, 누락되거나 읽을 수 없는 에셋, Rhai 오류를 반환합니다. 스크립트 오류의 줄·열은 Rhai가 위치를 제공할 때 표시됩니다.
 - `project_set_start_scene`에는 프로젝트의 `path`와 새 시작 씬 ID인 `start`를 넘깁니다. 이미 등록되어 있고 불러올 수 있는 씬을 선택해야 합니다.
 
+## MCP 게임 템플릿
+
+`project_template_list`로 사용 가능한 템플릿을 확인합니다. 첫 템플릿인 **Coin Collection**은 1인칭 카메라, 코인 세 개, 점수 HUD와 승리 조건이 있는 작은 게임입니다.
+
+```json
+{"template":"coin_collection","output_path":"My-Coin-Game"}
+```
+
+이 입력을 `game_create_from_template`에 전달하면 새 폴더에 씬과 프로젝트 파일을 생성합니다. 기존 폴더의 내용은 보존됩니다. 반환된 `project_path`는 에디터에서 열거나 `project_build`에 전달하고, `playtest`는 그대로 `play_test`에 전달해 세 코인을 모으는지 확인할 수 있습니다. 직접 플레이할 때는 게임 화면을 클릭하고 기본 이동 키인 **WASD**를 사용합니다.
+
 ## MCP 프리팹과 씬 전환
 
 - `prefab_create`에 씬 `path`와 원본 `object_id`를 넘기면 오브젝트와 자식으로 프리팹을 만듭니다.
@@ -253,7 +263,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Cli
 
 ## AI 플레이 세션
 
-Futty MCP의 플레이 도구는 저장된 씬에서 창 없이 게임을 실행합니다. 메인 카메라에 캐릭터 컨트롤러가 있어야 합니다. 다음은 [Beacon Bot Escape](../examples/agent-escape/Beacon%20Bot%20Escape.futty.scene.ron)의 시작 입력입니다.
+Futty MCP의 플레이 도구는 카메라와 캐릭터 컨트롤러가 있는 저장된 씬을 창 없이 실행합니다. 두 컴포넌트는 같은 오브젝트에 둘 수도 있고 나눌 수도 있습니다. 카메라에 컨트롤러가 없으면 씬 목록의 첫 캐릭터를 조작합니다. 다음은 [Beacon Bot Escape](../examples/agent-escape/Beacon%20Bot%20Escape.futty.scene.ron)의 시작 입력입니다.
 
 ```json
 {"path":"examples/agent-escape/Beacon Bot Escape.futty.scene.ron","max_ticks":600}
@@ -316,9 +326,105 @@ HUD 배치는 씬 파일에 저장되며 Play와 Windows 내보내기에도 적�
 
 ## Sprite3D
 
+### 2D 씬 구성하기
+
+화면을 XY 평면으로 쓰려면 카메라를 +Z 방향에 두고 씬을 바라보게 합니다. 에디터에서는 카메라를 **Orthographic**으로 지정합니다. MCP에서는 `add_camera` 또는 `scene_add_camera`에 화면 세로 반높이인 `orthographic_size`를 넘깁니다.
+
+```json
+{"op":"add_camera","key":"view","name":"2D Camera","position":[0,2,10],"target":[0,2,0],"orthographic_size":4}
+```
+
+플레이어는 별도 오브젝트로 두고 **Physics → Character controller**의 이동 모드를 고릅니다. MCP의 `set_component`에서는 `{"kind":"character","mode":"side_scroller"}`처럼 설정합니다.
+
+- **2D Side-scroller** (`side_scroller`)는 X축 이동과 Y축 중력·점프를 사용합니다.
+- **2D Top-down** (`top_down_2d`)은 XY 평면을 이동하며 중력과 점프가 적용되지 않습니다.
+- 두 모드에서 이동은 캐릭터의 Z 좌표를 유지합니다. 충돌은 기존 물리 엔진을 사용하므로 벽과 바닥의 충돌체가 캐릭터의 Z 평면과 겹쳐야 합니다.
+
+MCP로 스프라이트를 붙이려면 PNG를 가져온 뒤 `scene_apply`의 `{"op":"set_sprite","object":"player","texture_id":"<png-uuid>","size":[1,1],"billboard":"Fixed"}`를 사용합니다. 저장한 씬은 `play_test`와 `scene_capture`에서 검사할 수 있습니다.
+
 1. **Project → Import…**에서 PNG를 가져온 뒤 에셋을 우클릭해 **Place Sprite**를 누르거나 더블클릭합니다. 스프라이트는 이미지 비율과 투명도를 유지합니다.
 2. **Inspector → Object → Sprite3D**에서 텍스처, 너비·높이, 빌보드 모드를 설정합니다. **Face camera**는 카메라 화면을 향하고, **Upright**는 Y축을 세운 채 카메라 쪽으로 돌며, **Fixed**는 오브젝트의 회전을 따릅니다.
 3. **File → Sprite Playground**를 열고 우클릭 드래그로 카메라를 돌리면 세 가지 모드를 비교할 수 있습니다.
+
+#### 스프라이트 시트와 카메라 추적
+
+**Inspector → Sprite3D → Sprite sheet**에서 같은 크기의 프레임으로 나뉜 PNG의 열과 행, 시작 칸, 프레임 수, fps, 반복 여부를 지정합니다. 첫 칸은 0이고 왼쪽에서 오른쪽으로, 위에서 아래로 셉니다. **Loop**를 끄면 마지막 프레임에서 멈추고, 프레임을 1개로 지정하면 PNG의 한 칸을 계속 표시합니다.
+
+MCP에서는 스프라이트와 직교 카메라를 만든 뒤 `scene_apply`에 아래 작업을 추가합니다. 카메라 추적은 씬에서 지정한 태그를 가진 첫 번째 대상의 월드 좌표를 사용합니다. 횡스크롤에서 `[true,false]`로 X축만 추적하거나, 탑다운에서 `[true,true]`로 두 축을 추적할 수 있습니다. 대상 태그가 없으면 카메라의 기존 위치를 사용합니다.
+
+```json
+[
+  {"op":"set_sprite_sheet","object":"player","sheet":{"columns":4,"rows":2,"first_frame":0,"frames":4,"fps":8,"looping":true}},
+  {"op":"set_camera_follow","object":"view","tag":"hero","offset":[0,1],"axes":[true,true]}
+]
+```
+
+`sheet: null`은 전체 PNG를 표시하고, `tag: null`은 카메라 추적을 끕니다. `scene_capture`에는 설정한 시작 칸이 표시됩니다.
+
+카메라가 레벨 끝에서 멈추게 하려면 `set_camera_follow`에 `"bounds":[[2,0],[18,8]]`처럼 카메라 중심의 최소·최대 XY 좌표를 추가합니다. 오프셋을 더한 뒤 추적 중인 축에만 적용됩니다. 화면 가장자리까지 맵을 채우려면 직교 카메라의 화면 반높이와 종횡비를 고려해 중심의 이동 범위를 정하세요.
+
+#### 타일맵과 플랫폼 점프
+
+격자 스프라이트 PNG를 `asset_import`로 등록한 뒤 `scene_apply`에서 `paint_tilemap2d`로 배치합니다. 아래 예제에서 아틀라스의 0번 칸은 바닥, 1번 칸은 장식입니다.
+
+```json
+{
+  "op":"paint_tilemap2d",
+  "map":{
+    "texture_id":"<png-uuid>",
+    "atlas":[2,1],
+    "rows":[[null,1,null,null],[0,0,null,0]],
+    "solid":[0],
+    "origin":[0,0,1],
+    "tile_size":1
+  }
+}
+```
+
+행은 위에서 아래로, 열은 왼쪽에서 오른쪽으로 읽습니다. `origin`은 격자의 왼쪽 위 칸 중심이고, `null`은 빈 칸입니다. 한 번에 최대 64×64 격자에서 1,024개 타일을 생성합니다. 타일은 각각 에디터에서 옮기고 수정할 수 있는 오브젝트로 저장됩니다. 여러 레이어는 Z가 다른 원점으로 배치할 수 있습니다.
+
+**Inspector → Physics → Character controller → 2D Side-scroller**에서 **Ledge grace**는 발판을 벗어난 직후 점프를 허용하고, **Jump buffer**는 착지 직전 누른 점프를 착지 후 실행합니다. 두 값의 단위는 초이며, 0은 해당 보정을 끕니다. MCP에서는 `set_component`에 `{"kind":"character","mode":"side_scroller","coyote_time":0.10,"jump_buffer":0.12}`를 사용합니다.
+
+#### 시드 기반 탑다운 미로
+
+`scene_apply`의 `generate_maze2d`는 XY 평면에 방과 통로를 연결하고, 벽 충돌체와 탑다운 플레이어, 목표 지점을 배치합니다. 빈 구역에서 실행하세요. `scene_create`로 만든 씬의 기본 큐브는 `remove_leaf`로 지울 수 있습니다.
+
+```json
+[
+  {"op":"generate_maze2d","start_key":"player","goal_key":"exit",
+   "layout":{"seed":0,"rooms":[2,2],"cell_size":3,"origin":[0,0,1]}},
+  {"op":"add_camera","key":"view","name":"Maze Camera",
+   "position":[3,3,16],"target":[3,3,1],"orthographic_size":8},
+  {"op":"set_script","object":"exit","name":"Reach exit",
+   "source":"fn on_update(entity, dt) { if !find_nearby(entity, \"maze_player\", 0.5).is_empty() { finish_game(\"success\"); } }"}
+]
+```
+
+- `rooms`는 X·Y 방향 각각 2~8개입니다. `cell_size`는 3~12 월드 단위이며 기본값은 3입니다. `origin`은 플레이어 시작점이며 기본값은 `[0,0,0]`입니다.
+- 같은 시드와 설정은 같은 배치를 만듭니다. 생성한 벽과 마커는 에디터에서 수정할 수 있는 일반 오브젝트입니다. 플레이어와 목표의 UUID는 응답의 `objects`에서 각 키로 조회합니다.
+- 예제에서는 목표에서 0.5 월드 단위 안으로 들어오면 승리합니다. `play_test`에서 `forward` 82틱과 `right` 82틱을 차례로 실행하고 `"expect":"success"`로 확인할 수 있습니다.
+
+### 로컬 2인 협동
+
+1. 씬에 캐릭터 컨트롤러를 가진 오브젝트를 두 개 이상 배치하고 주 카메라가 두 캐릭터를 담도록 구성합니다. 탑다운 게임에는 직교 카메라와 `top_down_2d` 이동 모드를 사용합니다.
+2. 에디터의 **Window → Game Controls** 또는 **F10**에서 **Two-player local co-op**을 켜고 씬을 저장합니다. MCP에서는 `scene_apply`에 `{"op":"set_local_coop","enabled":true}`를 넣습니다.
+3. **Play**를 누르거나 저장한 프로젝트를 Windows 게임으로 내보내 실행합니다. 두 플레이어는 주 카메라 화면을 공유합니다.
+
+주 카메라에 캐릭터 컨트롤러가 붙어 있으면 그 캐릭터를 P1로 씁니다. 별도 카메라를 쓰면 씬 목록의 첫 캐릭터가 P1이고, P1을 제외한 첫 캐릭터가 P2입니다. `scene_inspect`의 `local_player_two`에서 P2 UUID를 확인할 수 있습니다.
+
+| 동작 | P1 기본 키 | P2 키 |
+| --- | --- | --- |
+| 이동 | WASD | 방향키 |
+| 점프 | Space | K |
+| 발사 / 재장전 | 마우스 왼쪽 / R | L / O |
+| 상호작용 | E | P |
+| 재시도 | Enter | J |
+
+P1은 **Game Controls**의 키 설정을 사용합니다. 같은 키가 두 플레이어에 배정되면 협동 중에는 P2가 사용합니다. 점프·발사·재시도 같은 동작은 씬의 이동 모드와 스크립트에 따라 작동합니다.
+
+- 2D 캐릭터는 범위 안에서 장애물에 가리지 않은 가장 가까운 대상과 상호작용합니다. 안내에는 P1 또는 P2가 표시됩니다. 대상의 `on_interact(entity, actor)`에서 `actor == find_tag("player_two")` 같은 조건으로 플레이어별 규칙을 적용할 수 있습니다.
+- 각 캐릭터 스크립트에서 `input_pressed()`를 사용해 해당 플레이어 입력을 읽습니다. 두 캐릭터에 체력을 추가하고 **Gauge**에 `player.health`와 `player2.health`를 지정하면 체력바를 따로 표시할 수 있습니다.
+- MCP의 `play_step`과 `play_test`에서는 `players` 목록에 캐릭터 UUID와 동작을 각각 넘겨 협동 규칙을 검증합니다.
 
 ## 물리
 
@@ -332,6 +438,75 @@ HUD 배치는 씬 파일에 저장되며 Play와 Windows 내보내기에도 적�
 - 강체의 **Collision layer**는 1–32이며 **Collision mask**의 최하위 비트가 레이어 1입니다. `FFFFFFFF`는 모든 레이어를 선택합니다. 캐릭터는 마스크에 포함된 고체 충돌체를 통과할 수 없습니다. Pulse Range의 발사는 가장 가까운 고체에서 막힙니다.
 
 ## Rhai 스크립트
+
+### 체력과 피해
+
+에디터의 **Physics → Health**에서 최대 체력을 설정하거나, MCP의 `scene_apply`에서 체력 컴포넌트를 추가합니다. 플레이를 시작하면 최대 체력으로 시작합니다.
+
+```json
+{"op":"set_component","object":"player","component":{"kind":"health","max":100}}
+```
+
+- `damage(target, amount)`와 `heal(target, amount)`는 양수로 호출합니다. 체력은 0과 최대 체력 사이에 머무릅니다.
+- `get_health(target)`는 `current`, `max`, `fraction`, `alive`를 반환합니다. 체력 컴포넌트가 없으면 `()`입니다.
+- 피격·회복 시 대상의 `on_damage(entity, source, amount)`, `on_heal(entity, source, amount)`가 호출됩니다. `amount`는 실제로 깎이거나 회복된 양입니다. 체력이 0이 되는 순간 `on_death(entity, source)`가 한 번 호출됩니다.
+- 쓰러진 캐릭터는 이동과 상호작용을 멈춥니다. 연출은 `on_death`에서 제어하고, 부활은 살아 있을 때 저장한 체크포인트를 복원합니다. 일반 회복은 쓰러진 캐릭터에 적용되지 않습니다.
+
+```rhai
+fn on_update(entity, dt) {
+    let health = get_health(entity);
+    set_hud("player.health", health.fraction);
+}
+```
+
+Gauge의 바인딩을 `player.health`로 지정하면 체력바를 그릴 수 있습니다. MCP 플레이 관찰의 `player.health`, `players`, `visible_objects`에서도 현재·최대 체력을 확인할 수 있습니다.
+
+### 게임 상태와 체크포인트
+
+`game_set("score", 7)`로 플레이 세션에 숫자·문자열·불리언을 저장하고, `game_get("score")`로 읽습니다. 없는 키는 `()`을 반환하고, `game_set("score", ())`는 키를 지웁니다. 에디터에서 Play 중이거나 단독 게임에서 프로젝트 씬을 전환하면 이 값들은 다음 씬의 `on_start`부터 읽을 수 있습니다. 값 설정과 `load_scene()`을 같은 콜백에서 호출할 경우 값부터 설정합니다.
+
+캐릭터나 상호작용 스크립트에서 `save_checkpoint(actor)`를 호출하면 해당 캐릭터의 위치·회전·체력과 현재 게임 상태·HUD 값을 저장합니다. 같은 씬에서 `restore_checkpoint(actor)`를 호출하면 저장한 캐릭터 상태와 값이 돌아오고 낙하 속도가 초기화됩니다. 저장한 체크포인트가 없는 캐릭터는 그대로 유지됩니다.
+
+게임 상태는 같은 플레이 세션에서 공유됩니다. 체크포인트를 복원하면 공유 값과 HUD가 저장 당시로 돌아갑니다. 체크포인트는 현재 씬에서만 유지되며 디스크 저장, 다른 오브젝트의 자세, 스크립트의 `this` 값과 타이머는 포함하지 않습니다. MCP 플레이 관찰에서는 `game_state`를 확인할 수 있습니다.
+
+### 타이머와 쿨다운
+
+타이머는 오브젝트별로 저장되고, 시뮬레이션이 진행될 때 고정 틱 기준으로 흐릅니다. 초당 60틱입니다.
+
+| Rhai 함수 | 동작 |
+| --- | --- |
+| `set_timer("round", 180)` | 3초짜리 타이머를 시작하거나 다시 설정 |
+| `timer_remaining("round")` | 남은 틱 수 반환. 타이머가 없거나 만료됐다면 0 |
+| `cancel_timer("round")` | 타이머 취소 |
+| `try_cooldown("dash", 30)` | 쿨다운이 준비됐다면 30틱을 설정하고 `true` 반환. 아직 진행 중이면 `false` |
+
+시간 제한은 `on_fixed_update`에서 남은 틱을 확인하고, 입력에 반응하는 재사용 대기는 `if try_cooldown("dash", 30) { ... }`처럼 사용합니다. 씬을 다시 시작하면 타이머가 초기화됩니다.
+
+### 오브젝트 상호작용
+
+`scene_apply`에서 `interaction` 컴포넌트를 추가하고 대상에 `on_interact(entity, actor)`를 구현한 Rhai 스크립트를 붙입니다. `actor`는 입력을 보낸 캐릭터입니다.
+
+```json
+{"op":"set_component","object":"door","component":{"kind":"interaction","range":2.0,"prompt":"Open door"}}
+```
+
+거리 안에서 대상을 바라보면 안내 문구가 표시됩니다. 기본 상호작용 키는 **E**이며, 표준 캐릭터 씬에서는 **마우스 오른쪽 버튼을 누른 채** 시점을 돌릴 수 있습니다. 시야를 가리는 충돌체가 있으면 대상은 선택되지 않습니다.
+
+### 여러 플레이어 입력 테스트
+
+`play_observe`의 `players`에서 캐릭터 UUID와 위치, 시선, 상호작용 대상을 확인합니다. 같은 틱에 서로 다른 입력을 보내려면 `play_step` 또는 `play_test`의 스텝에 최대 네 명의 `players`를 지정합니다.
+
+```json
+{"ticks":3,"players":[{"player_id":"<player-a-uuid>","actions":["interact"]},{"player_id":"<player-b-uuid>","actions":["forward"],"look":[15,0]}]}
+```
+
+플레이어별 입력을 사용할 때는 스텝의 최상위 `actions`와 `look`을 생략합니다. 입력을 생략한 캐릭터는 대기합니다. 이 방식은 한 시뮬레이션 안에서 여러 캐릭터를 검증하는 기능입니다.
+
+### 범위 감지와 활성화
+
+`find_nearby(entity, "coin", 2.0)`은 기준 오브젝트에서 반경 2m 안의 활성 오브젝트를 가까운 순서로 최대 128개 반환합니다. 지정한 태그와 월드 좌표를 기준으로 검색하고, 기준 오브젝트는 결과에서 제외합니다. 위치는 프레임 시작 시점의 상태를 사용합니다.
+
+`set_active(target, false)`는 다음 런타임 명령 처리에서 대상의 렌더링, 충돌, 스크립트 실행을 끕니다. `set_active(target, true)`는 보관한 대상 참조로 다시 활성화합니다. 비활성화 동안에도 UUID와 스크립트 상태는 유지됩니다. 대상 하나에만 적용되며 씬을 다시 열면 저장된 상태로 시작합니다.
 
 1. 오브젝트를 선택하고 **Inspector → Script → New script**를 누르거나 Project 빈 공간을 우클릭해 **New Script**를 누릅니다.
 2. Project의 스크립트를 더블클릭하거나 우클릭해 **Edit Code in VS Code**를 누르면 `.rhai` 파일이 열립니다. VS Code에서 **Ctrl+S**를 누르면 futty에 반영됩니다. 실행 중이었다면 **Stop → Play**로 새 코드를 실행합니다. VS Code가 없으면 내장 편집기 탭이 열립니다. 우클릭 메뉴의 **Edit in futty**로도 내장 편집기를 열 수 있습니다.

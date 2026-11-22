@@ -13,7 +13,7 @@ pub(crate) use futty_build::{MANIFEST, export};
 use futty_core::Asset;
 use futty_core::{AssetKind, Camera};
 pub(crate) use futty_render::draw_objects;
-use futty_runtime::{Hierarchy, Runtime, Scene};
+use futty_runtime::{Hierarchy, Runtime, Scene, ScriptFields};
 #[cfg(test)]
 use uuid::Uuid;
 
@@ -101,7 +101,7 @@ impl Player {
             .wgpu_render_state
             .clone()
             .ok_or("A wgpu device is required")?;
-        let world = GameScene::load(entry, &cc.egui_ctx, gpu, camera)?;
+        let world = GameScene::load(entry, &cc.egui_ctx, gpu, camera, ScriptFields::new())?;
         cc.egui_ctx
             .send_viewport_cmd(egui::ViewportCommand::Title(world.scene.name.clone()));
         Ok(Self {
@@ -121,7 +121,13 @@ impl Player {
                 .as_ref()
                 .ok_or("Open a Futty project to switch scenes")?;
             let path = list.resolve(root, id)?;
-            GameScene::load(&path, ctx, self.world.viewport.gpu(), Camera::default())
+            GameScene::load(
+                &path,
+                ctx,
+                self.world.viewport.gpu(),
+                Camera::default(),
+                self.world.runtime.game_state().clone(),
+            )
         })();
         match result {
             Ok(world) => {
@@ -154,6 +160,7 @@ impl GameScene {
         ctx: &egui::Context,
         gpu: RenderState,
         camera: Camera,
+        game_state: ScriptFields,
     ) -> Result<Self, Box<dyn Error>> {
         let scene = Scene::load(entry)?;
         let hierarchy = scene.hierarchy()?;
@@ -184,7 +191,7 @@ impl GameScene {
                 viewport.hud_image(ctx, asset.id, Some(&bytes));
             }
         }
-        let mut runtime = Runtime::new(&scene)?;
+        let mut runtime = Runtime::new(&scene)?.with_game_state(game_state);
         runtime.start_scripts(&scene, &scripts);
         Ok(Self {
             scene,
@@ -265,14 +272,22 @@ impl eframe::App for Player {
                     let game = (!self.controls_open).then_some(rect);
                     let hud_blocks_mouse = self.range_controls.cursor_free()
                         && hud_view::over_button(&ctx, rect, &self.world.scene.hud);
-                    let (dt, keys) = self.range_controls.input(
+                    let (dt, keys, second) = self.range_controls.input(
                         &ctx,
                         game,
                         is_range,
                         &self.input_settings.with_profile(&self.world.scene.input),
                         hud_blocks_mouse,
+                        self.world.scene.local_player_two().is_some(),
                     );
-                    self.world.runtime.game_input(keys);
+                    let player = self
+                        .world
+                        .scene
+                        .camera_index(None)
+                        .filter(|_| !is_range)
+                        .map(|index| self.world.scene.entities[index].uuid);
+                    InputSettings::aim_character(&ctx, &mut self.world.runtime, player, &keys);
+                    self.world.runtime.local_game_input(keys, second);
                     self.world.runtime.tick(dt);
                     if let Some(id) = self.world.runtime.take_scene_request() {
                         self.transition(&ctx, &id);
@@ -299,7 +314,7 @@ impl eframe::App for Player {
                 }
             });
         self.input_settings
-            .window(&ctx, &mut self.controls_open, &self.world.scene.input);
+            .window(&ctx, &mut self.controls_open, &self.world.scene, false);
         ctx.request_repaint();
     }
 
@@ -544,6 +559,7 @@ mod tests {
             texture: asset.id,
             size: Vec2::ONE,
             billboard: Billboard::Fixed,
+            sheet: None,
         });
         scene.assets.push(asset.clone());
         let texture = Asset {

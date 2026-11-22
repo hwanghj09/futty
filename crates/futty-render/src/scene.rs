@@ -49,15 +49,30 @@ pub fn draw_objects(
     selected: &[Uuid],
     preview: Option<&HashMap<Uuid, Transform>>,
 ) -> SceneFrame {
-    let (state, animations, spawned) = runtime.map_or_else(
-        || (HashMap::new(), HashMap::new(), &[][..]),
+    let (state, animations, sprite_times, inactive, spawned) = runtime.map_or_else(
+        || {
+            (
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+                Default::default(),
+                &[][..],
+            )
+        },
         |runtime| {
             let state = runtime
                 .extract()
                 .map(|(id, transform, color)| (id, (transform, color)))
                 .collect();
             let animations = runtime.animated_objects().collect::<HashMap<_, _>>();
-            (state, animations, runtime.spawned_objects())
+            let sprite_times = runtime.animated_sprites().collect::<HashMap<_, _>>();
+            (
+                state,
+                animations,
+                sprite_times,
+                runtime.inactive_objects().clone(),
+                runtime.spawned_objects(),
+            )
         },
     );
     let mut combined = Vec::new();
@@ -83,12 +98,13 @@ pub fn draw_objects(
         .collect();
     let world = hierarchy.world_matrices(|index| local[index].matrix());
     let view = camera_index
+        .filter(|&index| !inactive.contains(&scene.entities[index].uuid))
         .and_then(|index| scene.camera_view(index, hierarchy, &world, &local))
         .unwrap_or_else(|| camera.view());
     let instances = objects
         .iter()
         .zip(&world)
-        .filter(|(object, _)| object.has_renderer())
+        .filter(|(object, _)| object.has_renderer() && !inactive.contains(&object.uuid))
         .map(|(object, &matrix)| {
             let material = object
                 .material
@@ -118,7 +134,11 @@ pub fn draw_objects(
                 ),
                 surface: material.map_or_else(Default::default, |material| material.surface),
                 material_override: material.is_some(),
-                sprite: object.sprite.is_some(),
+                sprite: object.sprite.map(|sprite| {
+                    sprite.sheet.map_or([0.0, 0.0, 1.0, 1.0], |sheet| {
+                        sheet.uv_rect(sprite_times.get(&object.uuid).copied().unwrap_or(0.0))
+                    })
+                }),
                 animation: animations
                     .get(&object.uuid)
                     .copied()
@@ -135,6 +155,9 @@ pub fn draw_objects(
         .iter()
         .enumerate()
         .filter_map(|(index, object)| {
+            if inactive.contains(&object.uuid) {
+                return None;
+            }
             let light = object.light?;
             let position = world[index].w_axis.truncate();
             let toward_light = if light.kind == LightKind::Directional {
@@ -156,5 +179,123 @@ pub fn draw_objects(
         view,
         instances,
         lights,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futty_core::{Asset, AssetKind, Light};
+    use futty_runtime::Object;
+
+    #[test]
+    fn orthographic_frame_follows_script_movement_and_advances_sprite_cells() {
+        let mut scene = Scene::default();
+        let actor = &mut scene.entities[0];
+        let texture = Uuid::new_v4();
+        let script = Uuid::new_v4();
+        actor.tags.push("hero".into());
+        actor.script = Some(script);
+        actor.sprite = Some(futty_runtime::Sprite {
+            texture,
+            size: glam::Vec2::ONE,
+            billboard: futty_runtime::Billboard::Fixed,
+            sheet: Some(futty_runtime::SpriteSheet {
+                columns: 2,
+                rows: 1,
+                first_frame: 0,
+                frames: 2,
+                fps: 10.0,
+                looping: true,
+            }),
+        });
+        scene.assets.extend([
+            Asset {
+                id: texture,
+                name: "Sheet".into(),
+                kind: AssetKind::Texture,
+            },
+            Asset {
+                id: script,
+                name: "Move".into(),
+                kind: AssetKind::Script,
+            },
+        ]);
+        scene.script_sources.insert(
+            script,
+            "fn on_start(entity) { set_position(entity, 6.0, 7.0, 0.0); }".into(),
+        );
+        let camera_index = scene.entities.len();
+        let mut camera = Object::cube("View".into(), Vec3::new(0.0, 2.0, 10.0));
+        camera.camera = Some(CameraLens {
+            projection: Projection::Orthographic,
+            ..CameraLens::default()
+        });
+        camera.camera_follow = Some(futty_runtime::CameraFollow2d {
+            tag: "hero".into(),
+            offset: [1.0, 0.0],
+            axes: [true, false],
+            bounds: Some([[-4.0, -4.0], [5.0, 4.0]]),
+        });
+        scene.entities.push(camera);
+        let hierarchy = scene.hierarchy().unwrap();
+        let mut runtime = Runtime::new(&scene).unwrap();
+        runtime.start_scripts(&scene, &HashMap::new());
+        runtime.prepare_play();
+        let frame = |runtime| {
+            draw_objects(
+                &scene,
+                &hierarchy,
+                runtime,
+                Camera::default(),
+                Some(camera_index),
+                &[],
+                None,
+            )
+        };
+        assert_eq!(frame(None).instances[0].sprite, Some([0.0, 0.0, 0.5, 1.0]));
+        runtime.tick(0.1);
+        let played = frame(Some(&mut runtime));
+        assert_eq!(played.instances[0].sprite, Some([0.5, 0.0, 0.5, 1.0]));
+        assert_eq!(played.view.eye, Vec3::new(5.0, 2.0, 10.0));
+    }
+
+    #[test]
+    fn runtime_frame_omits_inactive_meshes_and_lights() {
+        let mut scene = Scene::default();
+        let mut light = Object::cube("Lamp".into(), Vec3::Y);
+        light.light = Some(Light::new(LightKind::Point));
+        light.tags.push("lamp".into());
+        let id = Uuid::new_v4();
+        scene.entities[0].script = Some(id);
+        scene.entities.push(light);
+        scene.assets.push(Asset {
+            id,
+            name: "Hide".into(),
+            kind: AssetKind::Script,
+        });
+        scene.script_sources.insert(
+            id,
+            r#"fn on_start(entity) {
+            set_active(entity, false);
+            set_active(find_tag("lamp"), false);
+        }"#
+            .into(),
+        );
+        let hierarchy = scene.hierarchy().unwrap();
+        let mut runtime = Runtime::new(&scene).unwrap();
+        runtime.start_scripts(&scene, &HashMap::new());
+        runtime.prepare_play();
+        let frame = draw_objects(
+            &scene,
+            &hierarchy,
+            Some(&mut runtime),
+            Camera::default(),
+            None,
+            &[],
+            None,
+        );
+        assert!(frame.instances.is_empty());
+        assert!(frame.lights.is_empty());
     }
 }

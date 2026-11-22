@@ -3,9 +3,11 @@ mod authoring;
 mod capture;
 mod components;
 mod interface;
+mod layout;
 mod play;
 mod replay;
 mod scripts;
+mod templates;
 
 use std::{
     collections::BTreeMap,
@@ -164,6 +166,8 @@ struct AddCamera {
     position: [f32; 3],
     /// World-space point the camera should face [x, y, z].
     target: [f32; 3],
+    /// Set an orthographic camera's vertical half-size in world units.
+    orthographic_size: Option<f32>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -441,6 +445,43 @@ impl Futty {
         };
         let project = Project::create_with_scenes(&path, scenes).map_err(io_error)?;
         Ok(project_info(&project, &input.path))
+    }
+
+    #[tool(
+        description = "List built-in Futty game project templates.",
+        annotations(read_only_hint = true)
+    )]
+    fn project_template_list(&self) -> CallToolResult {
+        CallToolResult::structured(json!({"templates":[{
+            "id":templates::COIN_COLLECTION,
+            "name":"Coin Collection",
+            "description":"First-person collection game with three coins, a score HUD, and a success condition.",
+        }]}))
+    }
+
+    #[tool(
+        description = "Create an editor-ready Futty project from a built-in template in a new folder. Returns a ready-to-run playtest."
+    )]
+    fn game_create_from_template(
+        &self,
+        Parameters(input): Parameters<templates::CreateGame>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let _lock = self.lock_edits().map_err(io_error)?;
+        let output = self.workspace_path(&input.output_path, false)?;
+        templates::create(&input.template, &output)?;
+        let folder = input.output_path.trim_end_matches(['/', '\\']);
+        let scene = format!("{folder}/{}", templates::SCENE_FILE);
+        Ok(CallToolResult::structured(json!({
+            "template":input.template,
+            "project_path":format!("{folder}/{}", templates::PROJECT_FILE),
+            "scene_path":scene,
+            "playtest":{
+                "path":scene,
+                "steps":[{"actions":["forward"],"ticks":120}],
+                "expect":"success",
+                "expect_hud":{"coins":3},
+            },
+        })))
     }
 
     #[tool(
@@ -839,7 +880,7 @@ impl Futty {
     }
 
     #[tool(
-        description = "Read an object's light, body or character component from a saved scene. Returns null when absent.",
+        description = "Read an object's light, body, character, interaction or health component. Returns null when absent.",
         annotations(read_only_hint = true)
     )]
     fn component_get(
@@ -932,7 +973,8 @@ impl Futty {
         &self,
         Parameters(input): Parameters<AddCamera>,
     ) -> Result<CallToolResult, ErrorData> {
-        let object = camera_object(input.name, input.position, input.target)?;
+        let mut object = camera_object(input.name, input.position, input.target)?;
+        set_orthographic(&mut object, input.orthographic_size)?;
         self.edit_scene(&input.path, |scene| {
             let id = object.uuid;
             let main = scene.camera_index(None).is_none();
@@ -1206,11 +1248,30 @@ fn scene_info(scene: &Scene) -> CallToolResult {
         "name": scene.name,
         "background": if scene.sky { "sky" } else { "solid" },
         "object_count": scene.entities.len(),
+        "local_coop": scene.local_coop,
+        "local_player_two": scene.local_player_two().map(|index| scene.entities[index].uuid),
         "main_camera": scene.camera_index(None).map(|index| scene.entities[index].uuid),
         "cameras": cameras,
         "assets": scene.assets,
         "prefabs": scene.prefabs.iter().map(|(&id, prefab)| json!({"id": id, "name": prefab.name})).collect::<Vec<_>>(),
     }))
+}
+
+fn set_orthographic(object: &mut Object, size: Option<f32>) -> Result<(), ErrorData> {
+    if let Some(size) = size {
+        let lens = CameraLens {
+            projection: futty_core::Projection::Orthographic,
+            size,
+            ..CameraLens::default()
+        };
+        if !lens.valid() {
+            return Err(invalid(
+                "Orthographic half-size must be between 0.05 and 500",
+            ));
+        }
+        object.camera = Some(lens);
+    }
+    Ok(())
 }
 
 fn camera_object(name: String, position: [f32; 3], target: [f32; 3]) -> Result<Object, ErrorData> {
@@ -1253,6 +1314,364 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_component_applies_damage_heal_death_and_checkpoint_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let server = Futty::new(root.clone());
+        let path = "Health.ron";
+        Scene::default().save_new(&root.join(path)).unwrap();
+        let script = r#"
+            fn on_start(entity) { this.deaths = 0; set_hud("deaths", 0); save_checkpoint(entity); }
+            fn on_update(entity, dt) {
+                if input_pressed("Interact") { damage(entity, 40); }
+                if input_pressed("Jump") { heal(entity, 20); }
+                if input_pressed("MoveForward") { damage(entity, 150); }
+                if input_pressed("MoveRight") { restore_checkpoint(entity); }
+            }
+            fn on_damage(entity, source, amount) { set_hud("damage", amount); }
+            fn on_heal(entity, source, amount) { set_hud("heal", amount); }
+            fn on_death(entity, source) {
+                this.deaths += 1;
+                set_hud("deaths", this.deaths);
+                let health = get_health(entity);
+                set_hud("health", health.fraction);
+            }
+        "#;
+        let mut edits = vec![
+            json!({"op":"add_camera","key":"player","name":"Player","position":[0,2,4],"target":[0,2,0],"character":true}),
+            json!({"op":"set_component","object":"player","component":{"kind":"health","max":100}}),
+            json!({"op":"set_script","object":"player","name":"Health rules","source":script}),
+        ];
+        for (index, binding) in ["damage", "heal", "deaths", "health"]
+            .into_iter()
+            .enumerate()
+        {
+            edits.push(json!({"op":"add_hud_text","label":binding,"binding":binding,"offset":[12,index*30],"size":[100,26]}));
+        }
+        server
+            .scene_apply(Parameters(
+                serde_json::from_value(json!({"path":path,"edits":edits})).unwrap(),
+            ))
+            .unwrap();
+        let initial = server
+            .play_start(Parameters(
+                serde_json::from_value(json!({"path":path})).unwrap(),
+            ))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        let step = |actions| {
+            server
+                .play_step(Parameters(
+                    serde_json::from_value(json!({
+                        "session_id":initial["session_id"],"actions":actions,"ticks":3
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap()
+                .structured_content
+                .unwrap()
+        };
+        assert_eq!(initial["player"]["health"]["current"], 100.0);
+        let damaged = step(["interact"]);
+        assert_eq!(damaged["player"]["health"]["current"], 60.0);
+        assert_eq!(damaged["hud"]["damage"], 40.0);
+        let healed = step(["jump"]);
+        assert_eq!(healed["player"]["health"]["current"], 80.0);
+        assert_eq!(healed["hud"]["heal"], 20.0);
+        let dead = step(["forward"]);
+        assert_eq!(dead["player"]["health"]["current"], 0.0);
+        assert_eq!(dead["hud"]["damage"], 80.0);
+        assert_eq!(dead["hud"]["health"], 0.0);
+        assert_eq!(dead["hud"]["deaths"], 1.0);
+        assert_eq!(step(["jump"])["player"]["health"]["current"], 0.0);
+        assert_eq!(step(["forward"])["hud"]["deaths"], 1.0);
+        assert_eq!(step(["right"])["player"]["health"]["current"], 100.0);
+    }
+
+    #[test]
+    fn orthographic_camera_tests_a_separate_character_in_the_xy_plane() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let server = Futty::new(root.clone());
+        let path = "Platform.ron";
+        Scene::default().save_new(&root.join(path)).unwrap();
+        let edits = json!([
+            {"op":"add_camera","key":"view","name":"Side camera","position":[0,2,10],"target":[0,2,0],"orthographic_size":4},
+            {"op":"add_object","key":"floor","name":"Floor","properties":{"position":[0,-0.25,1],"scale":[12,0.5,2],"collider":"fixed"}},
+            {"op":"add_object","key":"player","name":"Runner","properties":{"position":[0,1.65,1]}},
+            {"op":"set_component","object":"player","component":{"kind":"character","mode":"side_scroller"}}
+        ]);
+        let apply = |edits| {
+            server
+                .scene_apply(Parameters(
+                    serde_json::from_value(json!({"path":path,"edits":edits})).unwrap(),
+                ))
+                .unwrap()
+                .structured_content
+                .unwrap()
+        };
+        let objects = apply(edits)["objects"].clone();
+        let play = |steps| {
+            server
+                .play_test(Parameters(
+                    serde_json::from_value(json!({"path":path,"steps":steps,"expect":"running"}))
+                        .unwrap(),
+                ))
+                .unwrap()
+                .structured_content
+                .unwrap()["last_observation"]["player"]
+                .clone()
+        };
+        let platformer =
+            play(json!([{"ticks":18},{"actions":["right","forward","jump"],"ticks":18}]));
+        assert_eq!(platformer["id"], objects["player"]);
+        let position = platformer["position"].as_array().unwrap();
+        assert!(
+            position[0].as_f64().unwrap() > 1.0 && position[1].as_f64().unwrap() > 2.0,
+            "{platformer}"
+        );
+        assert_eq!(position[2], 1.0);
+        apply(
+            json!([{"op":"set_component","object":objects["player"],"component":{"kind":"character","mode":"top_down_2d"}}]),
+        );
+        let top = play(json!([{"actions":["forward","jump"],"ticks":30}]));
+        let position = top["position"].as_array().unwrap();
+        assert_eq!(position[0], 0.0);
+        assert!((position[1].as_f64().unwrap() - 3.85).abs() < 0.01, "{top}");
+        assert_eq!(position[2], 1.0);
+        let scene = Scene::load(&root.join(path)).unwrap();
+        assert_eq!(
+            scene.entities[scene.camera_index(None).unwrap()]
+                .camera
+                .unwrap()
+                .projection,
+            futty_core::Projection::Orthographic
+        );
+    }
+
+    #[test]
+    fn maze_batch_repeats_wall_layout_and_supports_a_playable_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Futty::new(dir.path().canonicalize().unwrap());
+        let create = |path: &str| {
+            let mut scene = Scene::default();
+            scene.entities.clear();
+            scene.save_new(&server.root.join(path)).unwrap();
+        };
+        let apply = |path: &str, seed: u32, rooms: [u8; 2]| {
+            server.scene_apply(Parameters(
+                serde_json::from_value(json!({"path":path,"edits":[
+                    {"op":"generate_maze2d","start_key":"player","goal_key":"exit",
+                        "layout":{"seed":seed,"rooms":rooms,"origin":[0,0,1]}},
+                    {"op":"add_camera","key":"view","name":"Overhead","position":[3,3,16],
+                        "target":[3,3,1],"orthographic_size":8},
+                    {"op":"set_camera_follow","object":"view","tag":"maze_player"},
+                    {"op":"set_script","object":"exit","name":"Reach exit",
+                        "source":r#"fn on_update(entity, dt) {
+                            if !find_nearby(entity, "maze_player", 0.5).is_empty() {
+                                finish_game("success");
+                            }
+                        }"#}
+                ]}))
+                .unwrap(),
+            ))
+        };
+        let walls = |path: &str| {
+            Scene::load(&server.root.join(path))
+                .unwrap()
+                .entities
+                .into_iter()
+                .filter(|object| object.name.starts_with("Maze wall "))
+                .map(|object| (object.name, object.transform, object.body))
+                .collect::<Vec<_>>()
+        };
+        let path = "Maze.ron";
+        create(path);
+        create("Same.ron");
+        create("Different.ron");
+        apply(path, 0, [2, 2]).unwrap();
+        apply("Same.ron", 0, [2, 2]).unwrap();
+        apply("Different.ron", 1, [2, 2]).unwrap();
+        assert_eq!(walls(path), walls("Same.ron"));
+        assert_ne!(walls(path), walls("Different.ron"));
+        let saved = std::fs::read(server.root.join(path)).unwrap();
+        assert!(apply(path, 0, [9, 2]).is_err());
+        assert_eq!(std::fs::read(server.root.join(path)).unwrap(), saved);
+        let play = |steps, expect| {
+            server
+                .play_test(Parameters(
+                    serde_json::from_value(json!({"path":path,"steps":steps,"expect":expect}))
+                        .unwrap(),
+                ))
+                .unwrap()
+                .structured_content
+                .unwrap()
+        };
+        let blocked = play(json!([{"actions":["right"],"ticks":82}]), "running");
+        assert!(
+            blocked["last_observation"]["player"]["position"][0]
+                .as_f64()
+                .unwrap()
+                < 1.5
+        );
+        let completed = play(
+            json!([{"actions":["forward"],"ticks":82},{"actions":["right"],"ticks":82}]),
+            "success",
+        );
+        assert_eq!(completed["passed"], true, "{completed}");
+    }
+
+    #[test]
+    fn two_players_move_and_interact_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let server = Futty::new(root.clone());
+        let path = "Players.ron";
+        let mut scene = Scene::default();
+        scene.entities.clear();
+        let press = scripts::register(
+            &mut scene,
+            "Press".into(),
+            r#"
+            fn fields() { #{ key: "presses" } }
+            fn on_start(entity) { this.count = 0; set_hud(param("key"), 0); }
+            fn on_interact(entity, actor) {
+                this.count += 1;
+                set_hud(param("key"), this.count);
+            }
+        "#
+            .into(),
+        );
+        let mut players = Vec::new();
+        let mut targets = Vec::new();
+        for (key, x) in [("left", -3.0), ("right", 3.0)] {
+            let mut camera = camera_object(key.into(), [x, 1.65, 4.0], [x, 1.65, 0.0]).unwrap();
+            camera.character = Some(Default::default());
+            players.push(camera.uuid);
+            let mut target = Object::cube(format!("{key} button"), Vec3::new(x, 1.65, 2.5));
+            target.spin = false;
+            target.interaction = Some(futty_runtime::Interaction {
+                prompt: format!("Use {key}"),
+                range: 2.0,
+            });
+            target.script = Some(press);
+            target
+                .script_fields
+                .insert("key".into(), futty_runtime::ScriptValue::Text(key.into()));
+            targets.push(target.uuid);
+            let mut hud = HudWidget::new(futty_runtime::HudKind::Text);
+            hud.binding = key.into();
+            scene.hud.push(hud);
+            scene.entities.extend([camera, target]);
+        }
+        scene.main_camera = Some(players[0]);
+        scene.save_new(&root.join(path)).unwrap();
+        let initial = server
+            .play_start(Parameters(
+                serde_json::from_value(json!({"path":path})).unwrap(),
+            ))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(
+            initial["players"][0]["interaction"]["object_id"],
+            targets[0].to_string()
+        );
+        assert_eq!(
+            initial["players"][1]["interaction"]["object_id"],
+            targets[1].to_string()
+        );
+        let step = |players| {
+            server
+                .play_step(Parameters(
+                    serde_json::from_value(json!({
+                        "session_id":initial["session_id"], "ticks":3, "players":players
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap()
+                .structured_content
+                .unwrap()
+        };
+        let first = step(json!([
+            {"player_id":players[0],"actions":["forward","interact"]},
+            {"player_id":players[1],"actions":[]}
+        ]));
+        assert_eq!(first["hud"], json!({"left":1.0,"right":0.0}));
+        assert!(first["players"][0]["position"][2].as_f64().unwrap() < 4.0);
+        assert_eq!(first["players"][1]["position"][2], 4.0);
+        let second = step(json!([
+            {"player_id":players[0],"actions":["interact"]},
+            {"player_id":players[1],"actions":["interact"]}
+        ]));
+        assert_eq!(second["hud"], json!({"left":1.0,"right":1.0}));
+        let third = step(json!([{"player_id":players[1],"look":[180.0,0.0]}]));
+        assert!(third["players"][1]["interaction"].is_null());
+        let replay_path = "Players.replay.json";
+        server
+            .play_save_replay(Parameters(
+                serde_json::from_value(json!({
+                    "session_id":initial["session_id"], "path":replay_path
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let replayed = server
+            .play_replay(Parameters(ReplayFile {
+                path: replay_path.into(),
+            }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(replayed["matched"], true);
+    }
+
+    #[test]
+    fn coin_template_creates_a_playable_project_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let server = Futty::new(root.clone());
+        let create = |template: &str, folder: &str| {
+            server.game_create_from_template(Parameters(templates::CreateGame {
+                template: template.into(),
+                output_path: folder.into(),
+            }))
+        };
+        assert!(create("unknown", "Game").is_err());
+        assert!(create(templates::COIN_COLLECTION, "../Game").is_err());
+        assert!(!root.join("Game").exists());
+        let generated = create(templates::COIN_COLLECTION, "Game")
+            .unwrap()
+            .structured_content
+            .unwrap();
+        let manifest = generated["project_path"].as_str().unwrap();
+        let source = root.join(generated["scene_path"].as_str().unwrap());
+        let before = fs::read(&source).unwrap();
+        assert!(create(templates::COIN_COLLECTION, "Game").is_err());
+        assert_eq!(fs::read(&source).unwrap(), before);
+        let valid = server
+            .project_validate(Parameters(ProjectFile {
+                path: manifest.into(),
+            }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(valid["valid"], true, "{valid}");
+        let input = serde_json::from_value(generated["playtest"].clone()).unwrap();
+        let outcome = server
+            .play_test(Parameters(input))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(outcome["passed"], true, "{outcome}");
+        assert_eq!(
+            outcome["last_observation"]["hud"]["objective"],
+            "All coins collected"
+        );
+    }
 
     #[test]
     fn project_build_publishes_a_portable_package_and_rejects_existing_output() {
@@ -2162,6 +2581,7 @@ mod tests {
                 name: "Camera".into(),
                 position: [0.0, 0.0, 3.0],
                 target: [0.0, 0.0, 0.0],
+                orthographic_size: None,
             }))
             .unwrap();
 

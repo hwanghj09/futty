@@ -12,7 +12,7 @@ use crate::{
 
 pub(crate) const MAX_TICKS: u32 = 36_000;
 const FORMAT: u32 = 1;
-const MAX_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -109,7 +109,7 @@ impl Replay {
             .read_to_end(&mut bytes)
             .map_err(io_error)?;
         if bytes.len() as u64 > MAX_BYTES {
-            return Err(invalid("Replay exceeds 16 MiB"));
+            return Err(invalid("Replay exceeds 32 MiB"));
         }
         let replay: Self = serde_json::from_slice(&bytes).map_err(invalid)?;
         if replay.format != FORMAT

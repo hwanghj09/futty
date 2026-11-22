@@ -1,5 +1,7 @@
 use futty_core::{Light, LightKind};
-use futty_runtime::{Body, CharacterController, Motion, Object};
+use futty_runtime::{
+    Body, CharacterController, CharacterMode, Health, Interaction, Motion, Object,
+};
 use rmcp::{ErrorData, schemars};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -13,6 +15,8 @@ pub(crate) enum ComponentKind {
     Light,
     Body,
     Character,
+    Interaction,
+    Health,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -30,6 +34,8 @@ impl ComponentKind {
             Self::Light => json!(object.light),
             Self::Body => json!(object.body),
             Self::Character => json!(object.character),
+            Self::Interaction => json!(object.interaction),
+            Self::Health => json!(object.health),
         }
     }
 
@@ -39,6 +45,8 @@ impl ComponentKind {
             Self::Light => object.light = None,
             Self::Body => object.body = None,
             Self::Character => object.character = None,
+            Self::Interaction => object.interaction = None,
+            Self::Health => object.health = None,
         }
         Ok(())
     }
@@ -82,12 +90,27 @@ pub(crate) enum ComponentPatch {
         collision_mask: Option<u32>,
     },
     Character {
+        /// spatial, side_scroller, or top_down_2d.
+        #[schemars(with = "Option<String>")]
+        mode: Option<CharacterMode>,
         radius: Option<f32>,
         height: Option<f32>,
         origin_height: Option<f32>,
         speed: Option<f32>,
         jump_speed: Option<f32>,
+        /// Seconds after leaving a ledge when a side-scroller jump is still accepted.
+        coyote_time: Option<f32>,
+        /// Seconds to retain an early side-scroller jump press.
+        jump_buffer: Option<f32>,
         collision_mask: Option<u32>,
+    },
+    Interaction {
+        prompt: Option<String>,
+        range: Option<f32>,
+    },
+    Health {
+        /// Maximum and initial health. Defaults to 100.
+        max: Option<f32>,
     },
 }
 
@@ -156,22 +179,39 @@ impl ComponentPatch {
                 });
             }
             Self::Character {
+                mode,
                 radius,
                 height,
                 origin_height,
                 speed,
                 jump_speed,
+                coyote_time,
+                jump_buffer,
                 collision_mask,
             } => {
                 let current = object.character.unwrap_or_default();
                 object.character = Some(CharacterController {
+                    mode: mode.unwrap_or(current.mode),
                     radius: radius.unwrap_or(current.radius),
                     height: height.unwrap_or(current.height),
                     origin_height: origin_height.unwrap_or(current.origin_height),
                     speed: speed.unwrap_or(current.speed),
                     jump_speed: jump_speed.unwrap_or(current.jump_speed),
+                    coyote_time: coyote_time.unwrap_or(current.coyote_time),
+                    jump_buffer: jump_buffer.unwrap_or(current.jump_buffer),
                     collision_mask: collision_mask.unwrap_or(current.collision_mask),
                 });
+            }
+            Self::Interaction { prompt, range } => {
+                let current = object.interaction.get_or_insert_with(Interaction::default);
+                if let Some(prompt) = prompt {
+                    current.prompt = prompt;
+                }
+                current.range = range.unwrap_or(current.range);
+            }
+            Self::Health { max } => {
+                let health = object.health.get_or_insert_with(Health::default);
+                health.max = max.unwrap_or(health.max);
             }
         }
         Ok(())

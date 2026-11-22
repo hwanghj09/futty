@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use eframe::egui;
 use futty_core::{Asset, AssetKind};
-use futty_runtime::{Billboard, Object, Scene, Sprite};
+use futty_runtime::{Billboard, Object, Scene, Sprite, SpriteSheet};
 use glam::{Vec2, Vec3};
 use uuid::Uuid;
 
@@ -16,6 +16,7 @@ fn sprite_object(asset: &Asset, position: Vec3, size: Vec2, billboard: Billboard
         texture: asset.id,
         size,
         billboard,
+        sheet: None,
     });
     object
 }
@@ -144,4 +145,51 @@ pub(crate) fn inspector(
             );
         }
     });
+    let mut use_sheet = sprite.sheet.is_some();
+    if ui.checkbox(&mut use_sheet, "Sprite sheet").changed() {
+        sprite.sheet = use_sheet.then_some(SpriteSheet {
+            columns: 1,
+            rows: 1,
+            first_frame: 0,
+            frames: 1,
+            fps: 8.0,
+            looping: true,
+        });
+    }
+    if let Some(sheet) = &mut sprite.sheet {
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::DragValue::new(&mut sheet.columns)
+                    .range(1..=256)
+                    .prefix("Columns "),
+            );
+            ui.add(
+                egui::DragValue::new(&mut sheet.rows)
+                    .range(1..=256)
+                    .prefix("Rows "),
+            );
+        });
+        let cells = u32::from(sheet.columns) * u32::from(sheet.rows);
+        let last = (cells - 1) as u16;
+        sheet.first_frame = sheet.first_frame.min(last);
+        ui.add(
+            egui::DragValue::new(&mut sheet.first_frame)
+                .range(0..=last)
+                .prefix("First cell "),
+        );
+        let available = (cells - u32::from(sheet.first_frame)).min(u32::from(u16::MAX)) as u16;
+        sheet.frames = sheet.frames.min(available);
+        ui.add(
+            egui::DragValue::new(&mut sheet.frames)
+                .range(1..=available)
+                .prefix("Frames "),
+        );
+        ui.add(
+            egui::DragValue::new(&mut sheet.fps)
+                .range(1.0..=60.0)
+                .speed(0.1)
+                .suffix(" fps"),
+        );
+        ui.checkbox(&mut sheet.looping, "Loop");
+    }
 }

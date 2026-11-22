@@ -1,6 +1,6 @@
 use eframe::egui;
 use egui::RichText;
-use futty_runtime::{Body, CharacterController, Motion, Object, Scene};
+use futty_runtime::{Body, CharacterController, CharacterMode, Health, Motion, Object, Scene};
 use glam::{Quat, Vec3};
 use uuid::Uuid;
 
@@ -70,6 +70,22 @@ pub fn inspector(ui: &mut egui::Ui, object: &mut Object, [min, max]: [Vec3; 2]) 
         object.character = controlled.then(CharacterController::default);
     }
     if let Some(character) = &mut object.character {
+        let label = match character.mode {
+            CharacterMode::Spatial => "3D",
+            CharacterMode::SideScroller => "2D Side-scroller",
+            CharacterMode::TopDown2d => "2D Top-down",
+        };
+        egui::ComboBox::from_id_salt("character-movement-mode")
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut character.mode, CharacterMode::Spatial, "3D");
+                ui.selectable_value(
+                    &mut character.mode,
+                    CharacterMode::SideScroller,
+                    "2D Side-scroller",
+                );
+                ui.selectable_value(&mut character.mode, CharacterMode::TopDown2d, "2D Top-down");
+            });
         let max_radius = (character.height * 0.5).min(2.0);
         scalar_field(
             ui,
@@ -90,8 +106,31 @@ pub fn inspector(ui: &mut egui::Ui, object: &mut Object, [min, max]: [Vec3; 2]) 
             0.0..=8.0,
         );
         scalar_field(ui, "Move speed", &mut character.speed, 0.1..=50.0);
-        scalar_field(ui, "Jump speed", &mut character.jump_speed, 0.0..=30.0);
+        if character.mode != CharacterMode::TopDown2d {
+            scalar_field(ui, "Jump speed", &mut character.jump_speed, 0.0..=30.0);
+        }
+        if character.mode == CharacterMode::SideScroller {
+            scalar_field(
+                ui,
+                "Ledge grace (s)",
+                &mut character.coyote_time,
+                0.0..=0.25,
+            );
+            scalar_field(
+                ui,
+                "Jump buffer (s)",
+                &mut character.jump_buffer,
+                0.0..=0.25,
+            );
+        }
         collision_mask(ui, &mut character.collision_mask);
+    }
+    let mut has_health = object.health.is_some();
+    if ui.checkbox(&mut has_health, "Health").changed() {
+        object.health = has_health.then(Health::default);
+    }
+    if let Some(health) = &mut object.health {
+        scalar_field(ui, "Maximum health", &mut health.max, 0.01..=1_000_000.0);
     }
     if object.character.is_none()
         && object

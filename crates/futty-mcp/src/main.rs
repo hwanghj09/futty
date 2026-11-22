@@ -7,6 +7,7 @@ mod layout;
 mod play;
 mod replay;
 mod report;
+mod review;
 mod scripts;
 mod templates;
 
@@ -209,22 +210,32 @@ impl Futty {
     }
 
     #[tool(
+        description = "Review a saved Futty project through validation and a registered scene playtest. Optionally capture a PNG and package a Windows game after the test passes. Returns stage results and stops on the first failure."
+    )]
+    async fn game_review(
+        &self,
+        Parameters(input): Parameters<review::Review>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let server = self.clone();
+        tokio::task::spawn_blocking(move || review::run(&server, input))
+            .await
+            .map_err(io_error)?
+    }
+
+    #[tool(
         description = "Render a saved scene from a camera into a new PNG using a graphics adapter."
     )]
     async fn scene_capture(
         &self,
         Parameters(input): Parameters<capture::Capture>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut context = ReportContext::new(&input.path);
-        context.output_path = Some(input.output_path.clone());
-        async {
-            let path = self.scene_path(&input.path, true)?;
-            let output = self.workspace_file(&input.output_path, "png", false)?;
-            tokio::task::spawn_blocking(move || {
-                let ([width, height], camera_id) = capture::save(&path, &output, &input)?;
-                Ok(CallToolResult::structured(json!({"output_path": input.output_path, "camera_id":camera_id,"width":width,"height":height})))
-            }).await.map_err(io_error)?
-        }.await.map_err(|error| report::execution(error, Stage::CameraCapture, context))
+        let server = self.clone();
+        let context = ReportContext::output(&input.path, &input.output_path);
+        tokio::task::spawn_blocking(move || server.capture_scene(input))
+            .await
+            .map_err(io_error)
+            .and_then(|result| result)
+            .map_err(|error| report::execution(error, Stage::CameraCapture, context))
     }
 
     #[tool(description = "Create a prefab from an object and its descendants in a saved scene.")]
@@ -620,8 +631,7 @@ impl Futty {
         Parameters(input): Parameters<BuildProject>,
     ) -> Result<CallToolResult, ErrorData> {
         let server = self.clone();
-        let mut context = ReportContext::new(&input.path);
-        context.output_path = Some(input.output_path.clone());
+        let context = ReportContext::output(&input.path, &input.output_path);
         tokio::task::spawn_blocking(move || server.build_project(input))
             .await
             .map_err(io_error)
@@ -1180,8 +1190,21 @@ impl Futty {
         Ok(path)
     }
 
+    fn capture_scene(&self, input: capture::Capture) -> Result<CallToolResult, ErrorData> {
+        let path = self.scene_path(&input.path, true)?;
+        let output = self.workspace_file(&input.output_path, "png", false)?;
+        let ([width, height], camera_id) = capture::save(&path, &output, &input)?;
+        Ok(CallToolResult::structured(json!({
+            "output_path":input.output_path,"camera_id":camera_id,"width":width,"height":height,
+        })))
+    }
+
     fn build_project(&self, input: BuildProject) -> Result<CallToolResult, ErrorData> {
         let _lock = self.lock_edits().map_err(io_error)?;
+        self.package_project(input)
+    }
+
+    fn package_project(&self, input: BuildProject) -> Result<CallToolResult, ErrorData> {
         let project = self.project_path(&input.path, true)?;
         let output = self.workspace_path(&input.output_path, false)?;
         let template = self.workspace_file(

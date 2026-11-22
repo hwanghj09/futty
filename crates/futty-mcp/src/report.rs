@@ -48,6 +48,13 @@ impl Context {
             replay_path: None,
         }
     }
+
+    pub fn output(path: &str, output_path: &str) -> Self {
+        Self {
+            output_path: Some(output_path.into()),
+            ..Self::new(path)
+        }
+    }
 }
 
 #[derive(Serialize, schemars::JsonSchema)]

@@ -307,6 +307,31 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Cli
 
 검증, 플레이테스트, 캡처, Windows 빌드는 단계와 오류 코드를 담은 `failure_report`를 반환합니다. JSON Schema는 MCP의 `game_failure_schema`에서 조회합니다. [필드와 응답 위치](failure-report.md)
 
+### 프로젝트 통합 검증
+
+`game_review`는 프로젝트의 모든 등록 씬을 검증한 뒤 지정한 씬의 플레이테스트를 실행합니다. 테스트가 통과하면 요청한 PNG를 저장하고 Windows 게임을 패키징합니다.
+
+```json
+{
+  "path": "My-Power-Maze/2D Power Maze.futty.project.ron",
+  "playtest": {
+    "path": "My-Power-Maze/Power Maze.futty.scene.ron",
+    "steps": [
+      {"actions":["forward"],"ticks":82},
+      {"actions":["right"],"ticks":82},
+      {"actions":["backward"],"ticks":82},
+      {"actions":["forward"],"ticks":82}
+    ],
+    "expect":"success",
+    "expect_hud":{"power":1}
+  },
+  "capture": {"path":"My-Power-Maze/Power Maze.futty.scene.ron","output_path":"Maze.png"},
+  "build": {"output_path":"Maze-Windows"}
+}
+```
+
+`playtest`에는 템플릿 생성 응답의 값을 그대로 사용할 수 있습니다. `capture`와 `build`는 선택 사항이며, 테스트와 캡처 대상은 그 프로젝트에 등록된 씬이어야 합니다. 응답의 `steps`에는 실행한 단계와 통과 여부가 기록됩니다. 실패한 단계에서는 `failure_report`를 반환하고 이후 단계는 실행하지 않습니다. 이미 생성한 리플레이와 PNG는 보존됩니다.
+
 ## AI 플레이 세션
 
 Futty MCP의 플레이 도구는 카메라와 캐릭터 컨트롤러가 있는 저장된 씬을 창 없이 실행합니다. 두 컴포넌트는 같은 오브젝트에 둘 수도 있고 나눌 수도 있습니다. 카메라에 컨트롤러가 없으면 씬 목록의 첫 캐릭터를 조작합니다. 다음은 [Beacon Bot Escape](../examples/agent-escape/Beacon%20Bot%20Escape.futty.scene.ron)의 시작 입력입니다.

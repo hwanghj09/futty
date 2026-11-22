@@ -300,6 +300,7 @@ Planned → Generated → Validated → Imported → Bound → Tested → Final
 - [x] RON에 `SceneDimension`을 도입하고 필드가 없는 기존 씬은 `ThreeD`로 로드. 에디터와 MCP에서 직교 카메라를 갖춘 새 `TwoD` 씬 생성. [2D 씬 가이드](guide.md#2d-씬-구성하기)
 - [x] Sprite2D와 직교 PNG 캡처 및 Rapier2D XY 충돌 예제. [Planar Collision](../examples/planar-collision/)
 - [x] 씬·프로젝트 검증, 플레이테스트, 카메라 캡처, Windows 패키징에 버전이 있는 실패 리포트 적용. [JSON 계약](failure-report.md)
+- [x] `game_review`로 등록 씬 검증과 플레이테스트를 연결하고 통과 후 선택한 PNG 캡처·Windows 패키징 실행. 실패한 단계와 앞서 생성한 산출물을 응답으로 확인. [통합 검증](guide.md#프로젝트-통합-검증)
 - [ ] 원스톱/2D/멀티플레이 기능은 증거(테스트+실행 파일)가 생길 때만 체크박스 완료로 변경.
 
 ## 9. 자동 검증·성공 지표

@@ -180,7 +180,6 @@ impl ShadowMap {
         queue: &gpu::Queue,
         instance_buffer: &gpu::Buffer,
         draws: &[Draw<'_>],
-        first_instance: usize,
         projection: Mat4,
     ) {
         queue.write_buffer(
@@ -204,10 +203,9 @@ impl ShadowMap {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.transform_group, &[]);
         pass.set_vertex_buffer(1, instance_buffer.slice(..));
-        for (index, draw) in draws.iter().enumerate() {
+        for draw in draws.iter().filter(|draw| draw.casts_shadow) {
             draw.bind(&mut pass);
-            let index = (first_instance + index) as u32;
-            pass.draw_indexed(draw.indices.clone(), 0, index..index + 1);
+            pass.draw_indexed(draw.indices.clone(), 0, draw.instances.clone());
         }
     }
 }

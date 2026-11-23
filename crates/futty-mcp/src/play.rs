@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
@@ -9,7 +8,7 @@ use std::{
 
 use futty_runtime::{
     ActionState, FIXED_STEP_SECONDS, GameInput, GameOutcome, Hierarchy, HudKind, InputAction,
-    Runtime, Scene, ScriptValue,
+    Object, Runtime, Scene, SceneDimension, ScriptValue,
 };
 use glam::Vec3;
 use rmcp::{ErrorData, model::CallToolResult, schemars};
@@ -700,15 +699,14 @@ impl Session {
             .map(|(id, transform, _)| (id, transform))
             .collect();
         let sprites: HashMap<_, _> = self.runtime.animated_sprites().collect();
-        let spawned = self.runtime.spawned_objects();
-        let objects = if spawned.is_empty() {
-            Cow::Borrowed(self.scene.entities.as_slice())
-        } else {
-            Cow::Owned(self.scene.entities.iter().chain(spawned).cloned().collect())
-        };
-        let hierarchy = Hierarchy::new(&objects).map_err(io_error)?;
-        let local: Vec<_> = objects
+        let objects = self
+            .scene
+            .entities
             .iter()
+            .chain(self.runtime.spawned_objects());
+        let hierarchy = Hierarchy::from_objects(objects.clone()).map_err(io_error)?;
+        let local: Vec<_> = objects
+            .clone()
             .map(|object| state.get(&object.uuid).copied().unwrap_or(object.transform))
             .collect();
         let worlds = hierarchy.world_matrices(|index| local[index].matrix());
@@ -717,9 +715,9 @@ impl Session {
             .camera_view(self.camera_index, &hierarchy, &worlds, &local)
             .ok_or_else(|| io_error("The character camera has an invalid pose"))?;
         let projection = camera.view_projection(16.0 / 9.0);
+        let planar = self.scene.dimension == SceneDimension::TwoD;
         let visible_objects = {
             let mut candidates: Vec<_> = objects
-                .iter()
                 .zip(worlds)
                 .filter_map(|(object, world)| {
                     if !object.has_renderer() || !self.runtime.is_active(object.uuid) {
@@ -738,12 +736,18 @@ impl Session {
                         .then_some((distance, position, object))
                 })
                 .collect();
-            candidates
-                .sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.2.uuid.cmp(&b.2.uuid)));
+            let nearest = |a: &(f32, Vec3, &Object), b: &(f32, Vec3, &Object)| {
+                a.0.total_cmp(&b.0).then_with(|| a.2.uuid.cmp(&b.2.uuid))
+            };
+            if planar && candidates.len() > MAX_VISIBLE {
+                candidates.select_nth_unstable_by(MAX_VISIBLE, nearest);
+                candidates.truncate(MAX_VISIBLE);
+            }
+            candidates.sort_unstable_by(nearest);
             candidates
                 .into_iter()
                 .filter(|&(distance, position, object)| {
-                    self.scene.dimension == futty_runtime::SceneDimension::TwoD
+                    planar
                         || self
                             .runtime
                             .raycast(camera.eye, position - camera.eye, distance, u32::MAX)
@@ -773,15 +777,16 @@ impl Session {
         };
         let primary = self.scene.entities[self.player_index].uuid;
         let player_pose = local[self.player_index];
-        let focus = self
-            .runtime
-            .interaction_focus(primary)
-            .map(|(target, prompt)| json!({"object_id":target,"prompt":prompt}));
+        let focus_for = |id| {
+            self.runtime
+                .interaction_focus(id)
+                .map(|(target, prompt)| json!({"object_id":target,"prompt":prompt}))
+        };
+        let focus = focus_for(primary);
         let players: Vec<_> = self.scene.entities.iter().filter(|object| object.character.is_some())
             .map(|object| {
                 let pose = state.get(&object.uuid).copied().unwrap_or(object.transform);
-                let interaction = self.runtime.interaction_focus(object.uuid)
-                    .map(|(target, prompt)| json!({"object_id":target,"prompt":prompt}));
+                let interaction = if object.uuid == primary { focus.clone() } else { focus_for(object.uuid) };
                 json!({
                     "id":object.uuid,"active":self.runtime.is_active(object.uuid),"position":pose.translation.to_array(),
                     "forward":(pose.rotation * Vec3::NEG_Z).to_array(),"interaction":interaction,

@@ -58,7 +58,7 @@ pub fn draw_objects(
                 HashMap::new(),
                 HashMap::new(),
                 HashMap::new(),
-                Default::default(),
+                None,
                 &[][..],
             )
         },
@@ -73,25 +73,29 @@ pub fn draw_objects(
                 state,
                 animations,
                 sprite_playback,
-                runtime.inactive_objects().clone(),
+                Some(runtime.inactive_objects()),
                 runtime.spawned_objects(),
             )
         },
     );
-    let mut combined = Vec::new();
-    let mut combined_hierarchy = None;
-    if !spawned.is_empty() {
-        combined.extend_from_slice(&scene.entities);
-        combined.extend_from_slice(spawned);
-        combined_hierarchy = Hierarchy::new(&combined).ok();
-    }
-    let (objects, hierarchy) = combined_hierarchy
-        .as_ref()
-        .map_or((&scene.entities, hierarchy), |hierarchy| {
-            (&combined, hierarchy)
-        });
-    let local: Vec<_> = objects
-        .iter()
+    let combined_hierarchy = if spawned.is_empty() {
+        None
+    } else {
+        Hierarchy::from_objects(scene.entities.iter().chain(spawned)).ok()
+    };
+    let spawned = if combined_hierarchy.is_some() {
+        spawned
+    } else {
+        &[]
+    };
+    let hierarchy = combined_hierarchy.as_ref().unwrap_or(hierarchy);
+    let objects = || scene.entities.iter().chain(spawned);
+    let is_inactive = |id| {
+        inactive
+            .as_ref()
+            .is_some_and(|objects| objects.contains(id))
+    };
+    let local: Vec<_> = objects()
         .map(|object| {
             preview
                 .and_then(|preview| preview.get(&object.uuid).copied())
@@ -101,13 +105,12 @@ pub fn draw_objects(
         .collect();
     let world = hierarchy.world_matrices(|index| local[index].matrix());
     let view = camera_index
-        .filter(|&index| !inactive.contains(&scene.entities[index].uuid))
+        .filter(|&index| !is_inactive(&scene.entities[index].uuid))
         .and_then(|index| scene.camera_view(index, hierarchy, &world, &local))
         .unwrap_or_else(|| camera.view());
-    let instances = objects
-        .iter()
+    let instances = objects()
         .zip(&world)
-        .filter(|(object, _)| object.has_renderer() && !inactive.contains(&object.uuid))
+        .filter(|(object, _)| object.has_renderer() && !is_inactive(&object.uuid))
         .map(|(object, &matrix)| {
             let material = object
                 .material
@@ -168,11 +171,10 @@ pub fn draw_objects(
             }
         })
         .collect();
-    let lights = objects
-        .iter()
+    let lights = objects()
         .enumerate()
         .filter_map(|(index, object)| {
-            if inactive.contains(&object.uuid) {
+            if is_inactive(&object.uuid) {
                 return None;
             }
             let light = object.light?;

@@ -1164,10 +1164,17 @@ fn start_timer(
 }
 
 pub(crate) fn world_position(poses: &QueryPoses, id: Uuid) -> Option<Vec3> {
-    let &(mut parent, local) = poses.get(&id)?;
+    world_position_with(id, |id| poses.get(&id).copied())
+}
+
+pub(crate) fn world_position_with(
+    id: Uuid,
+    lookup: impl Fn(Uuid) -> Option<(Option<Uuid>, Transform)>,
+) -> Option<Vec3> {
+    let (mut parent, local) = lookup(id)?;
     let mut point = local.translation;
     while let Some(id) = parent {
-        let &(next, transform) = poses.get(&id)?;
+        let (next, transform) = lookup(id)?;
         point = transform.matrix().transform_point3(point);
         parent = next;
     }

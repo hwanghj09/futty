@@ -722,15 +722,22 @@ pub struct Hierarchy {
 
 impl Hierarchy {
     pub fn new(objects: &[Object]) -> SceneResult<Self> {
+        Self::from_objects(objects.iter())
+    }
+
+    pub fn from_objects<'a>(
+        objects: impl Iterator<Item = &'a Object> + Clone,
+    ) -> SceneResult<Self> {
+        let len = objects.clone().count();
         let indices: HashMap<_, _> = objects
-            .iter()
+            .clone()
             .enumerate()
             .map(|(index, object)| (object.uuid, index))
             .collect();
-        let mut children = vec![Vec::new(); objects.len()];
+        let mut children = vec![Vec::new(); len];
         let mut roots = Vec::new();
-        let mut parents = Vec::with_capacity(objects.len());
-        for (index, object) in objects.iter().enumerate() {
+        let mut parents = Vec::with_capacity(len);
+        for (index, object) in objects.clone().enumerate() {
             let parent = match object.parent {
                 Some(id) => {
                     let &parent = indices.get(&id).ok_or_else(|| {
@@ -751,7 +758,7 @@ impl Hierarchy {
             parents.push(parent);
         }
         let mut stack: Vec<_> = roots.iter().rev().map(|&index| (index, 0)).collect();
-        let mut order = Vec::with_capacity(objects.len());
+        let mut order = Vec::with_capacity(len);
         while let Some((index, depth)) = stack.pop() {
             order.push((index, depth));
             stack.extend(
@@ -761,10 +768,9 @@ impl Hierarchy {
                     .map(|&child| (child, depth + 1)),
             );
         }
-        if order.len() != objects.len() {
+        if order.len() != len {
             let visited: HashSet<_> = order.iter().map(|&(index, _)| index).collect();
             let blocked = objects
-                .iter()
                 .enumerate()
                 .find(|(index, _)| !visited.contains(index));
             return Err(scene_issue(
@@ -905,6 +911,7 @@ impl RuntimeObject {
 pub struct Runtime {
     world: World,
     objects: QueryState<&'static mut RuntimeObject>,
+    index: ObjectIndex,
     physics: Physics,
     accumulated: f32,
     inactive: std::rc::Rc<std::cell::RefCell<HashSet<Uuid>>>,
@@ -930,6 +937,39 @@ pub struct Runtime {
     outcome: Option<GameOutcome>,
 }
 
+#[derive(Default)]
+struct ObjectIndex {
+    by_uuid: HashMap<Uuid, Entity>,
+    interactables: Vec<Entity>,
+    kinematics: Vec<Entity>,
+    side_scrollers: Vec<Entity>,
+    scripted: Vec<Entity>,
+}
+
+impl ObjectIndex {
+    fn insert(&mut self, object: &Object, entity: Entity) {
+        self.by_uuid.insert(object.uuid, entity);
+        if object.interaction.is_some() {
+            self.interactables.push(entity);
+        }
+        if object.script.is_some() {
+            self.scripted.push(entity);
+        }
+        if object
+            .body
+            .is_some_and(|body| body.motion == Motion::Kinematic)
+        {
+            self.kinematics.push(entity);
+        }
+        if object
+            .character
+            .is_some_and(|character| character.mode == CharacterMode::SideScroller)
+        {
+            self.side_scrollers.push(entity);
+        }
+    }
+}
+
 struct Checkpoint {
     transform: Transform,
     progress: std::rc::Rc<ScriptFields>,
@@ -942,8 +982,10 @@ impl Runtime {
         scene.validate()?;
         let mut world = World::new();
         let mut physics = Physics::new(scene.dimension);
+        let mut index = ObjectIndex::default();
         for object in &scene.entities {
-            world.spawn(RuntimeObject::new(object, &mut physics));
+            let entity = world.spawn(RuntimeObject::new(object, &mut physics)).id();
+            index.insert(object, entity);
         }
         let objects = world.query();
         let audio_cues = scene
@@ -973,6 +1015,7 @@ impl Runtime {
         Ok(Self {
             world,
             objects,
+            index,
             physics,
             accumulated: 0.0,
             inactive: Default::default(),
@@ -1122,12 +1165,15 @@ impl Runtime {
         }
     }
 
+    fn object(&self, id: Uuid) -> Option<&RuntimeObject> {
+        self.world.get(*self.index.by_uuid.get(&id)?)
+    }
+
     /// Supply input for one character. Unassigned players receive neutral input.
     pub fn game_input_for(&mut self, id: Uuid, input: GameInput) -> bool {
-        if !self
-            .objects
-            .iter(&self.world)
-            .any(|object| object.uuid == id && object.character.is_some())
+        if self
+            .object(id)
+            .is_none_or(|object| object.character.is_none())
         {
             return false;
         }
@@ -1143,7 +1189,15 @@ impl Runtime {
     }
 
     /// Focused target and prompt for an active character looking at an interactable.
-    pub fn interaction_focus(&mut self, player: Uuid) -> Option<(Uuid, String)> {
+    pub fn interaction_focus(&self, player: Uuid) -> Option<(Uuid, String)> {
+        self.focus_target(player)
+            .map(|(id, prompt)| (id, prompt.to_owned()))
+    }
+
+    fn focus_target(&self, player: Uuid) -> Option<(Uuid, &str)> {
+        if self.index.interactables.is_empty() {
+            return None;
+        }
         if self
             .health_state(player)
             .is_some_and(|health| !health.alive())
@@ -1151,57 +1205,59 @@ impl Runtime {
             return None;
         }
         let inactive = self.inactive.borrow();
-        if inactive.contains(&player)
-            || !self
-                .objects
-                .iter(&self.world)
-                .any(|o| o.interaction.is_some())
-        {
+        if inactive.contains(&player) {
             return None;
         }
-        let poses: script::QueryPoses = self
-            .objects
-            .iter(&self.world)
-            .map(|object| (object.uuid, (object.parent, object.transform)))
-            .collect();
-        let origin = script::world_position(&poses, player)?;
-        let actor = self
-            .objects
-            .iter(&self.world)
-            .find(|o| o.uuid == player && o.character.is_some())?;
+        let actor = self.object(player)?;
+        let directional = actor.character.as_ref()?.is_spatial();
+        let world_position = |id| {
+            script::world_position_with(id, |id| {
+                self.object(id)
+                    .map(|object| (object.parent, object.transform))
+            })
+        };
+        let origin = world_position(player)?;
         let forward = actor.transform.rotation * Vec3::NEG_Z;
-        let directional = actor
-            .character
-            .as_ref()
-            .is_some_and(character::CharacterMotion::is_spatial);
-        self.objects
-            .iter(&self.world)
-            .filter_map(|object| {
-                let interaction = object.interaction.as_ref()?;
-                if object.uuid == player || inactive.contains(&object.uuid) {
-                    return None;
-                }
-                let mut delta = script::world_position(&poses, object.uuid)? - origin;
-                if matches!(self.physics, Physics::Planar(_)) {
-                    delta.z = 0.0;
-                }
-                let distance = delta.length();
-                if distance > interaction.range
-                    || (directional && delta.try_normalize()?.dot(forward) < 0.866)
-                {
-                    return None;
-                }
-                if self
+        let planar = matches!(self.physics, Physics::Planar(_));
+        let mut best: Option<(f32, Uuid, &str)> = None;
+        for &entity in &self.index.interactables {
+            let object = self
+                .world
+                .get::<RuntimeObject>(entity)
+                .expect("indexed object");
+            let interaction = object.interaction.as_ref().expect("indexed interactable");
+            if object.uuid == player || inactive.contains(&object.uuid) {
+                continue;
+            }
+            let Some(position) = world_position(object.uuid) else {
+                continue;
+            };
+            let mut delta = position - origin;
+            if planar {
+                delta.z = 0.0;
+            }
+            let distance = delta.length();
+            if distance > interaction.range
+                || best.is_some_and(|(best_distance, best_id, _)| {
+                    distance
+                        .total_cmp(&best_distance)
+                        .then_with(|| object.uuid.cmp(&best_id))
+                        .is_ge()
+                })
+                || (directional
+                    && delta
+                        .try_normalize()
+                        .is_none_or(|direction| direction.dot(forward) < 0.866))
+                || self
                     .physics
                     .raycast(origin, delta, distance, u32::MAX)
                     .is_some_and(|hit| hit.entity != object.uuid)
-                {
-                    return None;
-                }
-                Some((distance, object.uuid, &interaction.prompt))
-            })
-            .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
-            .map(|(_, id, prompt)| (id, prompt.clone()))
+            {
+                continue;
+            }
+            best = Some((distance, object.uuid, &interaction.prompt));
+        }
+        best.map(|(_, id, prompt)| (id, prompt))
     }
 
     pub fn prepare_play(&mut self) {
@@ -1227,13 +1283,18 @@ impl Runtime {
         if !yaw_degrees.is_finite() || !pitch_degrees.is_finite() {
             return false;
         }
-        let Some(mut object) = self.objects.iter_mut(&mut self.world).find(|object| {
-            object.uuid == id
-                && object
+        let Some(mut object) = self
+            .index
+            .by_uuid
+            .get(&id)
+            .and_then(|&entity| self.world.get_mut::<RuntimeObject>(entity))
+            .filter(|object| {
+                object
                     .character
                     .as_ref()
                     .is_some_and(character::CharacterMotion::is_spatial)
-        }) else {
+            })
+        else {
             return false;
         };
         let forward = object.transform.rotation * Vec3::NEG_Z;
@@ -1339,10 +1400,8 @@ impl Runtime {
                 WorldCommand::Interact { actor, target } => {
                     if self.is_active(actor)
                         && self.health_state(actor).is_none_or(HealthState::alive)
-                        && let Some(mut object) = self
-                            .objects
-                            .iter_mut(&mut self.world)
-                            .find(|object| object.uuid == target)
+                        && let Some(&entity) = self.index.by_uuid.get(&target)
+                        && let Some(mut object) = self.world.get_mut::<RuntimeObject>(entity)
                     {
                         object.run_script(
                             &mut scripts,
@@ -1353,10 +1412,8 @@ impl Runtime {
                     }
                 }
                 WorldCommand::Message(message) => {
-                    if let Some(mut target) = self
-                        .objects
-                        .iter_mut(&mut self.world)
-                        .find(|object| object.uuid == message.target)
+                    if let Some(&entity) = self.index.by_uuid.get(&message.target)
+                        && let Some(mut target) = self.world.get_mut::<RuntimeObject>(entity)
                     {
                         target.run_script(
                             &mut scripts,
@@ -1373,11 +1430,7 @@ impl Runtime {
                 } => self.spawn_prefab(&mut scripts, prefab, root, position),
                 WorldCommand::Despawn(root) => self.despawn_prefab(&mut scripts, root),
                 WorldCommand::SetActive(id, active) => {
-                    if let Some(object) = self
-                        .objects
-                        .iter(&self.world)
-                        .find(|object| object.uuid == id)
-                    {
+                    if let Some(body) = self.object(id).map(|object| object.body) {
                         if active {
                             self.inactive.borrow_mut().remove(&id);
                         } else if self.inactive.borrow_mut().insert(id) {
@@ -1386,7 +1439,7 @@ impl Runtime {
                                 self.stopped_audio.push(id);
                             }
                         }
-                        if let Some((body, _)) = object.body {
+                        if let Some((body, _)) = body {
                             self.physics.set_enabled(body, active);
                         }
                     }
@@ -1413,10 +1466,8 @@ impl Runtime {
                     if self.health_state(id).is_some_and(|health| !health.alive()) {
                         continue;
                     }
-                    if let Some(object) = self
-                        .objects
-                        .iter(&self.world)
-                        .find(|object| object.uuid == id && object.character.is_some())
+                    if let Some(object) =
+                        self.object(id).filter(|object| object.character.is_some())
                     {
                         self.checkpoints.insert(
                             id,
@@ -1431,10 +1482,8 @@ impl Runtime {
                 }
                 WorldCommand::RestoreCheckpoint(id) => {
                     if let Some(checkpoint) = self.checkpoints.get(&id)
-                        && let Some(mut object) = self
-                            .objects
-                            .iter_mut(&mut self.world)
-                            .find(|object| object.uuid == id)
+                        && let Some(&entity) = self.index.by_uuid.get(&id)
+                        && let Some(mut object) = self.world.get_mut::<RuntimeObject>(entity)
                     {
                         object.transform = checkpoint.transform;
                         if let Some(character) = &mut object.character {
@@ -1478,10 +1527,8 @@ impl Runtime {
             ((state.current - before).abs(), !state.alive())
         };
         if amount > 0.0
-            && let Some(mut object) = self
-                .objects
-                .iter_mut(&mut self.world)
-                .find(|object| object.uuid == target)
+            && let Some(&entity) = self.index.by_uuid.get(&target)
+            && let Some(mut object) = self.world.get_mut::<RuntimeObject>(entity)
         {
             let event = if delta < 0.0 { "on_damage" } else { "on_heal" };
             object.run_script(
@@ -1519,6 +1566,7 @@ impl Runtime {
                 .world
                 .spawn(RuntimeObject::new(object, &mut self.physics))
                 .id();
+            self.index.insert(object, entity);
             branch.push((object.uuid, entity));
             scripts
                 .poses
@@ -1574,6 +1622,7 @@ impl Runtime {
                 self.physics.remove(body);
             }
             self.world.despawn(entity);
+            self.index.by_uuid.remove(&id);
             self.checkpoints.remove(&id);
             self.health.borrow_mut().remove(&id);
             scripts.forget(id);
@@ -1581,6 +1630,22 @@ impl Runtime {
                 self.stopped_audio.push(id);
             }
         }
+        self.index
+            .interactables
+            .retain(|&entity| self.world.get::<RuntimeObject>(entity).is_some());
+        self.index
+            .kinematics
+            .retain(|&entity| self.world.get::<RuntimeObject>(entity).is_some());
+        self.index
+            .side_scrollers
+            .retain(|&entity| self.world.get::<RuntimeObject>(entity).is_some());
+        self.index
+            .scripted
+            .retain(|&entity| self.world.get::<RuntimeObject>(entity).is_some());
+        // Despawning can move the table's last row into the vacated slot.
+        self.index
+            .scripted
+            .sort_unstable_by_key(|&entity| self.world.entity(entity).location().table_row.index());
         self.spawned
             .retain(|object| !removed.contains(&object.uuid));
         self.audio_cues.retain(|cue| !removed.contains(&cue.object));
@@ -1600,29 +1665,25 @@ impl Runtime {
             self.refresh_query_poses(&poses);
         }
         self.apply_world_commands();
-        if self.scripts.is_some() {
-            let mut actors: Vec<_> = self
-                .objects
-                .iter(&self.world)
-                .filter(|object| {
-                    object.character.is_some()
-                        && (!self.player_inputs.is_empty()
-                            || self.primary_character == Some(object.uuid))
-                        && self
-                            .player_inputs
-                            .get(&object.uuid)
-                            .map_or(&self.input, AsRef::as_ref)
-                            .action(InputAction::Interact)
-                            .pressed
-                })
-                .map(|object| object.uuid)
-                .collect();
+        if self.scripts.is_some() && !self.index.interactables.is_empty() {
+            let pressed = |input: &GameInput| input.action(InputAction::Interact).pressed;
+            let mut actors = Vec::new();
+            if self.player_inputs.is_empty() {
+                actors.extend(self.primary_character.filter(|_| pressed(&self.input)));
+            } else {
+                actors.extend(
+                    self.player_inputs
+                        .iter()
+                        .filter(|(_, input)| pressed(input))
+                        .map(|(&id, _)| id),
+                );
+            }
             actors.sort_unstable();
             for actor in actors {
                 if self.commands.len() >= MAX_WORLD_COMMANDS {
                     break;
                 }
-                if let Some((target, _)) = self.interaction_focus(actor) {
+                if let Some((target, _)) = self.focus_target(actor) {
                     self.commands.push(WorldCommand::Interact { actor, target });
                 }
             }
@@ -1647,25 +1708,33 @@ impl Runtime {
         };
         let planar = matches!(self.physics, Physics::Planar(_));
         if planar {
-            for mut object in self.objects.iter_mut(&mut self.world) {
+            for &entity in &self.index.side_scrollers {
+                let mut object = self
+                    .world
+                    .get_mut::<RuntimeObject>(entity)
+                    .expect("indexed character");
                 let id = object.uuid;
-                if let Some(character) = &mut object.character
-                    && character.is_side_scroller()
-                {
-                    character.pending_jump |= !inactive.contains(&id)
-                        && alive(id)
-                        && input_for(id).action(InputAction::Jump).pressed;
-                }
+                let character = object.character.as_mut().expect("indexed character");
+                character.pending_jump |= !inactive.contains(&id)
+                    && alive(id)
+                    && input_for(id).action(InputAction::Jump).pressed;
             }
         }
-        if planar || self.physics.count() != 0 || self.scripts.is_some() {
+        if !self.index.side_scrollers.is_empty()
+            || self.physics.count() != 0
+            || self.scripts.is_some()
+        {
             self.accumulated += frame;
             let requested = (self.accumulated / STEP) as usize;
             self.accumulated -= requested as f32 * STEP;
             for _ in 0..requested.min(MAX_STEPS) {
                 if let Some(scripts) = &mut self.scripts {
                     scripts.tick = scripts.tick.saturating_add(1);
-                    for mut object in self.objects.iter_mut(&mut self.world) {
+                    for &entity in &self.index.scripted {
+                        let mut object = self
+                            .world
+                            .get_mut::<RuntimeObject>(entity)
+                            .expect("indexed script owner");
                         object.run_script(
                             scripts,
                             &mut self.physics,
@@ -1675,7 +1744,11 @@ impl Runtime {
                     }
                 }
                 let mut moving_platforms = false;
-                for mut object in self.objects.iter_mut(&mut self.world) {
+                for &entity in &self.index.kinematics {
+                    let mut object = self
+                        .world
+                        .get_mut::<RuntimeObject>(entity)
+                        .expect("indexed kinematic body");
                     if inactive.contains(&object.uuid) {
                         continue;
                     }
@@ -1692,12 +1765,13 @@ impl Runtime {
                     }
                 }
                 if moving_platforms {
-                    for mut object in self.objects.iter_mut(&mut self.world) {
-                        if !inactive.contains(&object.uuid)
-                            && alive(object.uuid)
-                            && let Some(character) = &object.character
-                            && character.is_side_scroller()
-                        {
+                    for &entity in &self.index.side_scrollers {
+                        let mut object = self
+                            .world
+                            .get_mut::<RuntimeObject>(entity)
+                            .expect("indexed character");
+                        if !inactive.contains(&object.uuid) && alive(object.uuid) {
+                            let character = object.character.as_ref().expect("indexed character");
                             object.transform.translation = character
                                 .follow_platform(&self.physics, object.transform.translation);
                         }
@@ -1722,51 +1796,65 @@ impl Runtime {
                         }
                     }
                     if let Some(scripts) = &mut self.scripts {
-                        for event in self.physics.recent().to_vec() {
+                        for index in 0..self.physics.recent().len() {
+                            let event = self.physics.recent()[index];
                             let name = match (event.sensor, event.started) {
                                 (true, true) => "on_trigger_enter",
                                 (true, false) => "on_trigger_exit",
                                 (false, true) => "on_collision_enter",
                                 (false, false) => "on_collision_exit",
                             };
-                            for mut object in self.objects.iter_mut(&mut self.world) {
-                                if object.uuid == event.first || object.uuid == event.second {
-                                    let other = if object.uuid == event.first {
-                                        event.second
-                                    } else {
-                                        event.first
-                                    };
-                                    if let Some((handle, _)) = object.body {
-                                        self.physics.pose(handle, &mut object.transform);
-                                    }
-                                    object.run_script(
-                                        scripts,
-                                        &mut self.physics,
-                                        Callback::Event(name, other),
-                                        &mut self.commands,
-                                    );
+                            let mut participants = [event.first, event.second]
+                                .map(|id| self.index.by_uuid.get(&id).copied());
+                            if let [Some(a), Some(b)] = participants {
+                                // Runtime objects share one table. Preserve the order of the former query scan.
+                                if self.world.entity(a).location().table_row.index()
+                                    > self.world.entity(b).location().table_row.index()
+                                {
+                                    participants.swap(0, 1);
                                 }
+                            }
+                            for entity in participants.into_iter().flatten() {
+                                let mut object = self
+                                    .world
+                                    .get_mut::<RuntimeObject>(entity)
+                                    .expect("indexed participant");
+                                let other = if object.uuid == event.first {
+                                    event.second
+                                } else {
+                                    event.first
+                                };
+                                if let Some((handle, _)) = object.body {
+                                    self.physics.pose(handle, &mut object.transform);
+                                }
+                                object.run_script(
+                                    scripts,
+                                    &mut self.physics,
+                                    Callback::Event(name, other),
+                                    &mut self.commands,
+                                );
                             }
                         }
                     }
                 }
                 if planar {
-                    for mut object in self.objects.iter_mut(&mut self.world) {
+                    for &entity in &self.index.side_scrollers {
+                        let mut object = self
+                            .world
+                            .get_mut::<RuntimeObject>(entity)
+                            .expect("indexed character");
                         let id = object.uuid;
                         let transform = object.transform;
-                        if let Some(character) = &mut object.character
-                            && character.is_side_scroller()
-                        {
-                            let jump = std::mem::take(&mut character.pending_jump);
-                            if !inactive.contains(&id) && alive(id) {
-                                object.transform.translation = character.step(
-                                    &self.physics,
-                                    STEP,
-                                    transform.translation,
-                                    character.direction(input_for(id), Vec3::NEG_Z),
-                                    jump,
-                                );
-                            }
+                        let character = object.character.as_mut().expect("indexed character");
+                        let jump = std::mem::take(&mut character.pending_jump);
+                        if !inactive.contains(&id) && alive(id) {
+                            object.transform.translation = character.step(
+                                &self.physics,
+                                STEP,
+                                transform.translation,
+                                character.direction(input_for(id), Vec3::NEG_Z),
+                                jump,
+                            );
                         }
                     }
                 }
@@ -2282,6 +2370,100 @@ mod tests {
         scene.hud.push(image);
         assert!(scene.save(&path).is_err());
         assert_eq!(Scene::load(&path).unwrap(), loaded);
+    }
+
+    #[test]
+    fn indexed_collision_callbacks_keep_scene_order_on_both_participants() {
+        let mut scene = Scene::new(SceneDimension::TwoD);
+        let script = Uuid::new_v4();
+        scene.assets.push(Asset {
+            id: script,
+            name: "Trigger order".into(),
+            kind: AssetKind::Script,
+        });
+        scene.script_sources.insert(
+            script,
+            r#"fn fields() { #{ label: "" } }
+               fn on_trigger_enter(entity, other) { log(param("label")); }"#
+                .into(),
+        );
+        for (label, sensor, motion) in [
+            ("solid", false, Motion::Dynamic),
+            ("sensor", true, Motion::Fixed),
+        ] {
+            let mut object = Object::cube(label.into(), Vec3::ZERO);
+            object.spin = false;
+            object.script = Some(script);
+            object.body = Some(Body {
+                sensor,
+                motion,
+                ..Default::default()
+            });
+            object
+                .script_fields
+                .insert("label".into(), ScriptValue::Text(label.into()));
+            scene.entities.push(object);
+        }
+        let mut runtime = Runtime::new(&scene).unwrap();
+        runtime.start_scripts(&scene, &HashMap::new());
+        runtime.prepare_play();
+        runtime.tick(STEP);
+        assert_eq!(
+            runtime.physics_events().next().unwrap().first,
+            scene.entities[2].uuid
+        );
+        assert_eq!(
+            runtime.script_log().collect::<Vec<_>>(),
+            ["solid · solid", "sensor · sensor"]
+        );
+    }
+
+    #[test]
+    fn interaction_focus_preserves_hierarchy_occlusion_and_uuid_ties() {
+        let mut scene = Scene::new(SceneDimension::TwoD);
+        let mut player = Object::cube("Player".into(), Vec3::ZERO);
+        player.character = Some(CharacterController {
+            mode: CharacterMode::TopDown2d,
+            ..Default::default()
+        });
+        let player_id = player.uuid;
+        let parent = Object::cube("Parent".into(), Vec3::X * 1.5);
+        let interactable = |name: &str, id, position| {
+            let mut object = Object::cube(name.into(), position);
+            object.uuid = Uuid::from_u128(id);
+            object.interaction = Some(Interaction {
+                prompt: name.into(),
+                ..Default::default()
+            });
+            object
+        };
+        let mut near = interactable("Behind wall", 3, Vec3::NEG_X * 0.3);
+        near.parent = Some(parent.uuid);
+        let far_b = interactable("Tie B", 2, Vec3::Y * 1.5);
+        let far_a = interactable("Tie A", 1, Vec3::NEG_Y * 1.5);
+        let mut wall = Object::cube("Wall".into(), Vec3::X * 0.8);
+        wall.body = Some(Body {
+            motion: Motion::Fixed,
+            size: Vec3::new(0.2, 0.5, 1.0),
+            ..Default::default()
+        });
+        let wall_id = wall.uuid;
+        scene
+            .entities
+            .extend([player, parent, near, far_b, far_a, wall]);
+        let mut runtime = Runtime::new(&scene).unwrap();
+        runtime.prepare_play();
+        assert_eq!(
+            runtime.interaction_focus(player_id),
+            Some((Uuid::from_u128(1), "Tie A".into()))
+        );
+        let handle = runtime.object(wall_id).unwrap().body.unwrap().0;
+        runtime.physics.set_enabled(handle, false);
+        runtime.prepare_play();
+        assert_eq!(
+            runtime.interaction_focus(player_id),
+            Some((Uuid::from_u128(3), "Behind wall".into()))
+        );
     }
 
     #[test]

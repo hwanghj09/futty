@@ -3,7 +3,7 @@ use std::{collections::HashMap, ops::Range};
 use bytemuck::{Pod, Zeroable};
 use futty_assets::{AnimationSample, Clip, Model, Part, Rig, Vertex};
 use futty_core::{CameraView, Light, LightKind, Primitive, Surface};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 use uuid::Uuid;
 use wgpu::{self as gpu, util::DeviceExt};
 
@@ -301,9 +301,28 @@ struct Draw<'a> {
     indices: Range<u32>,
     texture: &'a gpu::BindGroup,
     deformed: Option<gpu::BufferSlice<'a>>,
+    instances: Range<u32>,
+    in_view: bool,
+    casts_shadow: bool,
 }
 
-impl Draw<'_> {
+impl<'a> Draw<'a> {
+    fn append(self, draws: &mut Vec<Self>, pass_start: usize) {
+        if let Some(last) = draws[pass_start..].last_mut()
+            && last.deformed.is_none()
+            && self.deformed.is_none()
+            && std::ptr::eq(last.buffers, self.buffers)
+            && std::ptr::eq(last.texture, self.texture)
+            && last.indices == self.indices
+            && last.in_view == self.in_view
+            && last.casts_shadow == self.casts_shadow
+        {
+            last.instances.end = self.instances.end;
+        } else {
+            draws.push(self);
+        }
+    }
+
     fn bind(&self, pass: &mut gpu::RenderPass<'_>) {
         pass.set_vertex_buffer(
             0,
@@ -312,6 +331,35 @@ impl Draw<'_> {
         );
         pass.set_index_buffer(self.buffers.indices.slice(..), gpu::IndexFormat::Uint32);
     }
+}
+
+struct Frustum([Vec4; 6]);
+
+impl Frustum {
+    fn new(clip_from_world: Mat4) -> Self {
+        let [x, y, z, w] = std::array::from_fn(|index| clip_from_world.row(index));
+        Self([w + x, w - x, w + y, w - y, z, w - z])
+    }
+
+    fn includes(&self, world_from_local: Mat4, [min, max]: [Vec3; 2]) -> bool {
+        let local_from_plane = world_from_local.transpose();
+        let center = (max + min) * 0.5;
+        let half = (max - min) * 0.5;
+        !self.0.iter().any(|&plane| {
+            let local_plane = local_from_plane * plane;
+            let normal = local_plane.truncate();
+            normal.dot(center) + local_plane.w + normal.abs().dot(half) < -0.0001
+        })
+    }
+}
+
+fn sprite_matrix(object: &DrawObject, pixel_view: Option<CameraView>) -> Mat4 {
+    let mut matrix = object.matrix;
+    if let Some(view) = pixel_view.filter(|_| object.sprite_layer.is_some()) {
+        let corner = matrix.transform_point3(Vec3::new(-0.5, 0.5, 0.0));
+        matrix.w_axis += (view.snap_to_pixel_grid(corner) - corner).extend(0.0);
+    }
+    matrix
 }
 
 pub struct Renderer {
@@ -329,7 +377,11 @@ pub struct Renderer {
     models: HashMap<Uuid, GpuModel>,
     textures: HashMap<Uuid, (gpu::BindGroup, [u32; 2])>,
     instances: gpu::Buffer,
+    instance_data: Vec<Instance>,
     animation_vertices: gpu::Buffer,
+    animation_data: Vec<Vertex>,
+    animation_ranges: HashMap<usize, Range<u64>>,
+    sprite_order: Vec<(f32, usize)>,
     grid: Vec<Instance>,
 }
 
@@ -503,7 +555,11 @@ impl Renderer {
             models: HashMap::new(),
             textures: HashMap::new(),
             instances,
+            instance_data: Vec::new(),
             animation_vertices: Self::animation_buffer(device, size_of::<Vertex>() as u64),
+            animation_data: Vec::new(),
+            animation_ranges: HashMap::new(),
+            sprite_order: Vec::new(),
             grid,
         }
     }
@@ -618,14 +674,18 @@ impl Renderer {
         device: &gpu::Device,
         queue: &gpu::Queue,
         objects: &[DrawObject],
-    ) -> HashMap<usize, Range<u64>> {
+    ) {
         // shortcut: deform up to one million vertices per view on the CPU, move skinning to the GPU for larger scenes.
         let stride = size_of::<Vertex>() as u64;
         let capacity = device.limits().max_buffer_size.min(1_000_000 * stride);
-        let mut vertices = Vec::new();
-        let mut ranges = HashMap::new();
+        let vertices = &mut self.animation_data;
+        vertices.clear();
+        self.animation_ranges.clear();
         for (index, object) in objects.iter().enumerate() {
-            let Some(sample) = object.animation else {
+            let Some(sample) = object
+                .animation
+                .filter(|_| object.sprite.is_none() && object.matrix.is_finite())
+            else {
                 continue;
             };
             let Some(rig) = object
@@ -637,12 +697,13 @@ impl Renderer {
             };
             let start = vertices.len();
             if (start + rig.vertex_count()) as u64 * stride <= capacity
-                && rig.sample(sample, &mut vertices)
+                && rig.sample(sample, vertices)
             {
-                ranges.insert(index, start as u64 * stride..vertices.len() as u64 * stride);
+                self.animation_ranges
+                    .insert(index, start as u64 * stride..vertices.len() as u64 * stride);
             }
         }
-        let bytes = bytemuck::cast_slice(&vertices);
+        let bytes = bytemuck::cast_slice(vertices);
         if !bytes.is_empty() {
             let size = bytes.len() as u64;
             if self.animation_vertices.size() < size {
@@ -651,7 +712,6 @@ impl Renderer {
             }
             queue.write_buffer(&self.animation_vertices, 0, bytes);
         }
-        ranges
     }
 
     pub fn draw(
@@ -676,20 +736,43 @@ impl Renderer {
             grid: show_grid,
             ..
         } = scene;
-        let animated = self.animate_objects(device, queue, objects);
+        self.animate_objects(device, queue, objects);
+        let view_frustum = Frustum::new(view_projection);
+        let shadow_frustum = shadow_projection.map(Frustum::new);
         let grid = if show_grid { self.grid.as_slice() } else { &[] };
-        let mut instances = grid.to_vec();
+        let instances = &mut self.instance_data;
+        instances.clear();
+        instances.extend_from_slice(grid);
         let mut draws = Vec::new();
         for (index, object) in objects
             .iter()
             .enumerate()
             .filter(|(_, object)| object.sprite.is_none() && object.matrix.is_finite())
         {
+            let model = object.mesh.and_then(|id| self.models.get(&id));
+            let bounds = model.map_or_else(
+                || {
+                    object
+                        .mesh
+                        .map_or(object.primitive, |_| Primitive::Cube)
+                        .bounds()
+                },
+                |model| model.bounds,
+            );
+            // A skinned mesh can extend beyond its bind-pose bounds.
+            let animated = self.animation_ranges.get(&index);
+            let in_view = animated.is_some() || view_frustum.includes(object.matrix, bounds);
+            let casts_shadow = shadow_frustum.as_ref().is_some_and(|frustum| {
+                animated.is_some() || frustum.includes(object.matrix, bounds)
+            });
+            if !in_view && !casts_shadow {
+                continue;
+            }
             let replacement = object
                 .texture
                 .and_then(|id| self.textures.get(&id))
                 .map(|(group, _)| group);
-            if let Some(model) = object.mesh.and_then(|id| self.models.get(&id)) {
+            if let Some(model) = model {
                 for part in &model.parts {
                     let texture = replacement
                         .or_else(|| {
@@ -705,20 +788,24 @@ impl Renderer {
                     } else {
                         (Vec3::from(object.color) * Vec3::from(part.color)).to_array()
                     };
+                    let instance = instances.len() as u32;
                     instances.push(Instance::new(
                         object.matrix,
                         color,
                         if object.selected { 3.0 } else { 1.0 },
                         object.surface,
                     ));
-                    draws.push(Draw {
+                    Draw {
                         buffers: &model.buffers,
                         indices: part.indices.clone(),
                         texture,
                         deformed: animated
-                            .get(&index)
                             .map(|range| self.animation_vertices.slice(range.clone())),
-                    });
+                        instances: instance..instance + 1,
+                        in_view,
+                        casts_shadow,
+                    }
+                    .append(&mut draws, 0);
                 }
             } else {
                 let (primitive, color) = if object.mesh.is_some() {
@@ -727,6 +814,7 @@ impl Renderer {
                     (object.primitive, object.color)
                 };
                 let (buffers, count) = &self.primitives[primitive as usize];
+                let instance = instances.len() as u32;
                 instances.push(Instance::new(
                     object.matrix,
                     color,
@@ -739,40 +827,56 @@ impl Renderer {
                     },
                     object.surface,
                 ));
-                draws.push(Draw {
+                Draw {
                     buffers,
                     indices: 0..*count,
                     texture: replacement.unwrap_or(&self.white),
                     deformed: None,
-                });
+                    instances: instance..instance + 1,
+                    in_view,
+                    casts_shadow,
+                }
+                .append(&mut draws, 0);
             }
         }
         let first_sprite = draws.len();
-        let mut sprites: Vec<_> = objects
-            .iter()
-            .filter_map(|object| {
-                let uv = object.sprite.filter(|_| object.matrix.is_finite())?;
-                let center = view_projection * object.matrix.w_axis;
-                Some((center.z / center.w, object, uv))
-            })
-            .collect();
+        let sprites = &mut self.sprite_order;
+        sprites.clear();
+        sprites.extend(
+            objects
+                .iter()
+                .enumerate()
+                .filter(|(_, object)| object.sprite.is_some() && object.matrix.is_finite())
+                .filter(|(_, object)| {
+                    view_frustum.includes(
+                        sprite_matrix(object, pixel_view),
+                        [Vec3::new(-0.5, -0.5, 0.0), Vec3::new(0.5, 0.5, 0.0)],
+                    )
+                })
+                .map(|(index, object)| {
+                    let center = view_projection * object.matrix.w_axis;
+                    (center.z / center.w, index)
+                }),
+        );
         // shortcut: intersecting sprites sort by center depth, revisit if scenes need per-pixel ordering.
-        sprites.sort_by(|a, b| {
-            a.1.sprite_layer
+        sprites.sort_unstable_by(|a, b| {
+            objects[a.1]
+                .sprite_layer
                 .unwrap_or(0)
-                .cmp(&b.1.sprite_layer.unwrap_or(0))
+                .cmp(&objects[b.1].sprite_layer.unwrap_or(0))
                 .then_with(|| b.0.total_cmp(&a.0))
+                .then_with(|| a.1.cmp(&b.1))
         });
-        for (_, object, uv) in sprites {
-            let mut matrix = object.matrix;
-            let grid = pixel_view.filter(|_| object.sprite_layer.is_some());
-            if let Some(view) = grid {
-                let corner = matrix.transform_point3(Vec3::new(-0.5, 0.5, 0.0));
-                matrix.w_axis += (view.snap_to_pixel_grid(corner) - corner).extend(0.0);
-            }
+        for &(_, index) in sprites.iter() {
+            let object = &objects[index];
+            let uv = object.sprite.unwrap();
+            let matrix = sprite_matrix(object, pixel_view);
             // Sprite modes 4/5 use linear filtering; 6/7 use nearest-neighbor texels.
-            let mode =
-                if grid.is_some() { 6.0 } else { 4.0 } + f32::from(u8::from(object.selected));
+            let mode = if pixel_view.is_some() && object.sprite_layer.is_some() {
+                6.0
+            } else {
+                4.0
+            } + f32::from(u8::from(object.selected));
             let texture = object
                 .texture
                 .and_then(|id| self.textures.get(&id))
@@ -782,24 +886,29 @@ impl Renderer {
             } else {
                 [0.25, 0.18, 0.12]
             };
+            let instance = instances.len() as u32;
             instances.push(Instance {
                 model: matrix.to_cols_array_2d(),
                 color: [color[0], color[1], color[2], mode],
                 surface: uv,
             });
-            draws.push(Draw {
+            Draw {
                 buffers: &self.quad,
                 indices: 0..6,
                 texture: texture.unwrap_or(&self.white),
                 deformed: None,
-            });
+                instances: instance..instance + 1,
+                in_view: true,
+                casts_shadow: false,
+            }
+            .append(&mut draws, first_sprite);
         }
         if (instances.len() * size_of::<Instance>()) as u64 > self.instances.size() {
             self.instances = Self::instance_buffer(device, instances.len().next_power_of_two());
         }
         queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&uniform));
         if !instances.is_empty() {
-            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
         }
         let mut encoder = device.create_command_encoder(&gpu::CommandEncoderDescriptor {
             label: Some("Render scene viewport"),
@@ -810,7 +919,6 @@ impl Renderer {
                 queue,
                 &self.instances,
                 &draws[..first_sprite],
-                grid.len(),
                 projection,
             );
         }
@@ -855,13 +963,15 @@ impl Renderer {
                 pass.draw_indexed(0..36, 0, 0..grid.len() as u32);
             }
             for (index, draw) in draws.into_iter().enumerate() {
+                if !draw.in_view {
+                    continue;
+                }
                 if index == first_sprite {
                     pass.set_pipeline(&self.sprite_pipeline);
                 }
                 draw.bind(&mut pass);
                 pass.set_bind_group(1, draw.texture, &[]);
-                let index = (grid.len() + index) as u32;
-                pass.draw_indexed(draw.indices, 0, index..index + 1);
+                pass.draw_indexed(draw.indices, 0, draw.instances);
             }
         }
         queue.submit([encoder.finish()]);
@@ -1423,6 +1533,21 @@ mod tests {
         );
         let layered = pixels(&device, &queue, &targets);
         assert!(layered[right] > 245 && layered[right + 1] < 5);
+        let mut draws = Vec::new();
+        for instance in 0..256 {
+            Draw {
+                buffers: &renderer.quad,
+                indices: 0..6,
+                texture: &renderer.white,
+                deformed: None,
+                instances: instance..instance + 1,
+                in_view: true,
+                casts_shadow: false,
+            }
+            .append(&mut draws, 0);
+        }
+        assert_eq!(draws.len(), 1);
+        assert_eq!(draws[0].instances, 0..256);
         let solid = DrawObject {
             surface: Surface::default(),
             material_override: false,
@@ -1530,4 +1655,14 @@ mod tests {
     fn pixels(device: &gpu::Device, queue: &gpu::Queue, targets: &Targets) -> Vec<u8> {
         targets.read_rgba(device, queue).unwrap()
     }
+}
+#[test]
+fn frustum_keeps_objects_crossing_a_clip_plane() {
+    let frustum = Frustum::new(Mat4::IDENTITY);
+    let bounds = Primitive::Cube.bounds();
+    assert!(frustum.includes(Mat4::IDENTITY, bounds));
+    assert!(frustum.includes(Mat4::from_translation(Vec3::X * 1.4), bounds));
+    assert!(!frustum.includes(Mat4::from_translation(Vec3::X * 1.6), bounds));
+    assert!(!frustum.includes(Mat4::from_translation(Vec3::NEG_Z), bounds));
+    assert!(!frustum.includes(Mat4::from_translation(Vec3::Z * 2.0), bounds));
 }

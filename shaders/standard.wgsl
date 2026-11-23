@@ -102,10 +102,16 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let coords = select(in.uv, vec2<f32>(1.0) - in.uv, in.surface.zw < vec2<f32>(0.0));
     let sprite_uv = in.surface.xy + clamp(coords * extent, inset, extent - inset);
     let uv = select(in.uv, sprite_uv, sprite);
-    let texel = textureSample(base_color, base_sampler, uv);
+    var texel = textureSample(base_color, base_sampler, uv);
     if sprite {
+        if in.material.a > 5.5 {
+            let dimensions = textureDimensions(base_color, 0);
+            let pixel = min(vec2<u32>(uv * vec2<f32>(dimensions)), dimensions - vec2<u32>(1u));
+            texel = textureLoad(base_color, vec2<i32>(pixel), 0);
+        }
         let color = linear_to_srgb(in.material.rgb * texel.rgb);
-        return vec4<f32>(mix(color, vec3<f32>(0.66, 0.76, 0.87), select(0.0, 0.14, in.material.a > 4.5)), texel.a);
+        let selected = in.material.a == 5.0 || in.material.a == 7.0;
+        return vec4<f32>(mix(color, vec3<f32>(0.66, 0.76, 0.87), select(0.0, 0.14, selected)), texel.a);
     }
     if in.material.a < 0.5 {
         let fade = smoothstep(8.0, 22.0, length(in.world.xz));

@@ -31,6 +31,8 @@ impl Motion {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Body {
     pub motion: Motion,
+    #[serde(default, skip_serializing_if = "BodyShape::is_box")]
+    pub shape: BodyShape,
     pub size: Vec3,
     pub center: Vec3,
     pub mass: f32,
@@ -40,6 +42,29 @@ pub struct Body {
     pub sensor: bool,
     #[serde(default, skip_serializing_if = "CollisionLayers::is_default")]
     pub layers: CollisionLayers,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BodyShape {
+    #[default]
+    Box,
+    Circle,
+    Capsule,
+}
+
+impl BodyShape {
+    fn is_box(&self) -> bool {
+        *self == Self::Box
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Box => "Box",
+            Self::Circle => "Circle",
+            Self::Capsule => "Capsule",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -75,6 +100,7 @@ impl Default for Body {
     fn default() -> Self {
         Self {
             motion: Motion::Dynamic,
+            shape: BodyShape::Box,
             size: Vec3::ONE,
             center: Vec3::ZERO,
             mass: 1.0,
@@ -88,6 +114,19 @@ impl Default for Body {
 }
 
 impl Body {
+    /// Radius and half-length of the straight segment, after applying object scale.
+    pub fn planar_round_extents(self, scale: Vec3) -> Option<(f32, f32)> {
+        let half = self.size * scale * 0.5;
+        match self.shape {
+            BodyShape::Box => None,
+            BodyShape::Circle => Some((half.x, 0.0)),
+            BodyShape::Capsule => {
+                let radius = half.x.min(half.y);
+                Some((radius, half.y - radius))
+            }
+        }
+    }
+
     pub(crate) fn valid(self, transform: Transform) -> bool {
         let dimensions = self.size * transform.scale;
         let center = self.center * transform.scale;
@@ -401,8 +440,18 @@ impl Physics {
         }
     }
 
-    pub(crate) fn move_kinematic(&mut self, handle: BodyHandle, target: Transform) {
-        body_call!(self, handle, move_kinematic(target));
+    /// Returns whether this body can carry a side-scroller on this tick.
+    pub(crate) fn move_kinematic(&mut self, handle: BodyHandle, target: Transform) -> bool {
+        match (self, handle) {
+            (Self::Spatial(world), BodyHandle::Spatial(handle)) => {
+                world.move_kinematic(handle, target);
+                false
+            }
+            (Self::Planar(world), BodyHandle::Planar(handle)) => {
+                world.move_kinematic(handle, target)
+            }
+            _ => unreachable!("Body handle belongs to the runtime's physics world"),
+        }
     }
 
     pub(crate) fn apply_commands(
@@ -462,7 +511,18 @@ impl Physics {
         size: [f32; 2],
         delta: Vec3,
         mask: u32,
+        side_scroller: bool,
     ) -> (Vec3, bool) {
-        world_call!(self, move_capsule(dt, center, size, delta, mask))
+        match self {
+            Self::Spatial(world) => world.move_capsule(dt, center, size, delta, mask),
+            Self::Planar(world) => world.move_capsule(dt, center, size, delta, mask, side_scroller),
+        }
+    }
+
+    pub(crate) fn platform_carry(&self, center: Vec3, size: [f32; 2], mask: u32) -> Vec3 {
+        match self {
+            Self::Planar(world) => world.platform_carry(center, size, mask),
+            Self::Spatial(_) => Vec3::ZERO,
+        }
     }
 }

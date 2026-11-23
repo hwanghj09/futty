@@ -126,7 +126,7 @@ pub struct SpriteSheet {
 }
 
 impl SpriteSheet {
-    fn valid(self) -> bool {
+    pub(crate) fn valid(self) -> bool {
         (1..=256).contains(&self.columns)
             && (1..=256).contains(&self.rows)
             && self.frames > 0
@@ -135,7 +135,7 @@ impl SpriteSheet {
             && (1.0..=60.0).contains(&self.fps)
     }
 
-    pub fn uv_rect(self, seconds: f64) -> [f32; 4] {
+    pub fn frame_index(self, seconds: f64) -> u32 {
         let count = u32::from(self.frames).max(1);
         let elapsed = (seconds * f64::from(self.fps)).max(0.0).floor();
         let step = if self.looping {
@@ -143,7 +143,11 @@ impl SpriteSheet {
         } else {
             (elapsed as u32).min(count - 1)
         };
-        let frame = u32::from(self.first_frame) + step;
+        u32::from(self.first_frame) + step
+    }
+
+    pub fn uv_rect(self, seconds: f64) -> [f32; 4] {
+        let frame = self.frame_index(seconds);
         let columns = u32::from(self.columns).max(1);
         let cell = [1.0 / columns as f32, 1.0 / f32::from(self.rows.max(1))];
         [

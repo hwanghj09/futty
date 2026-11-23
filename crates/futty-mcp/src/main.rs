@@ -2,6 +2,7 @@ mod assets;
 mod authoring;
 mod capture;
 mod components;
+mod diff;
 mod interface;
 mod layout;
 mod play;
@@ -986,6 +987,47 @@ impl Futty {
     }
 
     #[tool(
+        description = "Preview an ordered scene_apply batch without saving. Returns validation issues, the scene revision, and the proposed changes.",
+        annotations(read_only_hint = true)
+    )]
+    fn scene_preview_ops(
+        &self,
+        Parameters(input): Parameters<Batch>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let path = self.scene_path(&input.path, true)?;
+        let relative = input.path.clone();
+        let (before, revision) = input.read(&path)?;
+        let result = match input.prepare(&before) {
+            Ok((after, objects)) => json!({
+                "valid":true, "path":relative, "revision":revision, "changed":before != after,
+                "preview_objects":objects, "changes":diff::changes(&before, &after),
+            }),
+            Err(error) => json!({
+                "valid":false, "path":relative, "revision":revision,
+                "issues":[error.data.as_ref().and_then(|data| data.get("issue")).cloned()
+                    .unwrap_or_else(|| json!({"message":error.message}))],
+            }),
+        };
+        Ok(CallToolResult::structured(result))
+    }
+
+    #[tool(
+        description = "Compare two saved scenes by UUID without writing either file.",
+        annotations(read_only_hint = true)
+    )]
+    fn scene_diff(
+        &self,
+        Parameters(input): Parameters<diff::Compare>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let before = Scene::load(&self.scene_path(&input.before_path, true)?).map_err(io_error)?;
+        let after = Scene::load(&self.scene_path(&input.after_path, true)?).map_err(io_error)?;
+        Ok(CallToolResult::structured(json!({
+            "before_path":input.before_path,"after_path":input.after_path,
+            "changed":before != after,"changes":diff::changes(&before,&after),
+        })))
+    }
+
+    #[tool(
         description = "Apply up to 64 ordered edits to a saved scene atomically, including setting or removing components. New objects can be referenced by key within the batch. Returns an undo token for the latest successful changed batch in this server session."
     )]
     fn scene_apply(
@@ -994,11 +1036,8 @@ impl Futty {
     ) -> Result<CallToolResult, ErrorData> {
         let _lock = self.lock_edits().map_err(io_error)?;
         let path = self.scene_path(&input.path, true)?;
-        let before = Scene::load(&path).map_err(io_error)?;
-        let mut after = before.clone();
-        let mut objects = input.apply(&mut after)?;
-        after.sync_prefabs(&before).map_err(authoring::invalid)?;
-        objects.retain(|_, id| after.entities.iter().any(|object| object.uuid == *id));
+        let (before, _) = input.read(&path)?;
+        let (after, objects) = input.prepare(&before)?;
         if before == after {
             return Ok(CallToolResult::structured(
                 json!({"changed": false, "objects": objects}),
@@ -1413,6 +1452,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scene_preview_and_diff_show_changes_without_writing_and_apply_checks_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Futty::new(dir.path().canonicalize().unwrap());
+        let path = "Main.ron";
+        let original = "Original.ron";
+        let scene = Scene::default();
+        let id = scene.entities[0].uuid;
+        scene.save_new(&server.root.join(path)).unwrap();
+        fs::copy(server.root.join(path), server.root.join(original)).unwrap();
+        let bytes = fs::read(server.root.join(path)).unwrap();
+        let preview = |edits| {
+            server
+                .scene_preview_ops(Parameters(
+                    serde_json::from_value(json!({"path":path,"edits":edits})).unwrap(),
+                ))
+                .unwrap()
+                .structured_content
+                .unwrap()
+        };
+        let edits = json!([
+            {"op":"set_component","object":id,"component":{"kind":"health","max":20}},
+            {"op":"add_object","key":"marker","name":"Marker"}
+        ]);
+        let planned = preview(edits.clone());
+        assert_eq!(planned["valid"], true);
+        assert_eq!(planned["changes"]["objects"]["added_count"], 1);
+        assert_eq!(
+            planned["changes"]["objects"]["updated"][0]["fields"]["health"]["after"]["max"],
+            20.0
+        );
+        assert!(planned["preview_objects"]["marker"].is_string());
+        assert!(server.undo.lock().unwrap().is_none());
+        let invalid = preview(json!([
+            {"op":"set_component","object":id,"component":{"kind":"health","max":-1}}
+        ]));
+        assert_eq!(invalid["valid"], false, "{invalid}");
+        assert_eq!(invalid["issues"][0]["field"], "health");
+        let bad_edit = preview(json!([{"op":"remove_leaf","object":"missing"}]));
+        assert_eq!(bad_edit["issues"][0]["edit"], 1);
+        assert_eq!(fs::read(server.root.join(path)).unwrap(), bytes);
+        let apply = || {
+            server.scene_apply(Parameters(
+                serde_json::from_value(
+                    json!({"path":path,"edits":edits,"expected_revision":planned["revision"]}),
+                )
+                .unwrap(),
+            ))
+        };
+        assert_eq!(
+            apply().unwrap().structured_content.unwrap()["changed"],
+            true
+        );
+        let saved = fs::read(server.root.join(path)).unwrap();
+        let rejected = apply().unwrap_err();
+        assert_eq!(
+            rejected.data.unwrap()["expected_revision"],
+            planned["revision"]
+        );
+        assert_eq!(fs::read(server.root.join(path)).unwrap(), saved);
+        let diff = server
+            .scene_diff(Parameters(diff::Compare {
+                before_path: original.into(),
+                after_path: path.into(),
+            }))
+            .unwrap()
+            .structured_content
+            .unwrap();
+        assert_eq!(diff["changes"]["objects"]["added_count"], 1);
+        assert_eq!(
+            diff["changes"]["objects"]["updated"],
+            planned["changes"]["objects"]["updated"]
+        );
+        assert_eq!(fs::read(server.root.join(original)).unwrap(), bytes);
+    }
 
     #[tokio::test]
     async fn capture_and_build_errors_carry_the_versioned_report_without_losing_mcp_codes() {

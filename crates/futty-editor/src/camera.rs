@@ -165,6 +165,19 @@ pub(crate) fn inspector(ui: &mut egui::Ui, lens: &mut CameraLens, main: bool) {
             .on_hover_text("Half the vertical size in world units");
         }
     });
+    if lens.projection == Projection::Orthographic {
+        let mut enabled = lens.pixels_per_unit.is_some();
+        if ui.checkbox(&mut enabled, "Pixel perfect").changed() {
+            lens.pixels_per_unit = enabled.then_some(32);
+        }
+        if let Some(pixels) = &mut lens.pixels_per_unit {
+            ui.add(
+                egui::DragValue::new(pixels)
+                    .range(1..=1024)
+                    .prefix("Pixels per unit "),
+            );
+        }
+    }
     ui.label("Clipping planes");
     ui.horizontal_wrapped(|ui| {
         let near_max = (lens.far - 0.01).clamp(0.01, 9999.0);

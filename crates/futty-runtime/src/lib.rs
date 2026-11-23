@@ -34,7 +34,7 @@ pub use prefab::{Prefab, PrefabLink};
 pub use range::{MAGAZINE, ROUND_SECONDS, RangeConfig, RangeInput, RangeStatus};
 
 pub use physics::{
-    Body, CollisionLayers, Motion, PhysicsEvent, RayHit, STEP as FIXED_STEP_SECONDS,
+    Body, BodyShape, CollisionLayers, Motion, PhysicsEvent, RayHit, STEP as FIXED_STEP_SECONDS,
 };
 use physics::{MAX_STEPS, Physics, STEP};
 pub use script::{
@@ -627,6 +627,13 @@ impl Scene {
                 return Err(format!("Invalid script field on {}", object.name).into());
             }
             if let Some(body) = object.body {
+                if self.dimension == SceneDimension::ThreeD && body.shape != BodyShape::Box {
+                    return Err(scene_issue(
+                        "body.shape",
+                        Some(object.uuid),
+                        "Circle and capsule rigid bodies require a 2D scene",
+                    ));
+                }
                 if object.parent.is_some() {
                     return Err(
                         format!("Physics body {} must be at the scene root", object.name).into(),
@@ -803,11 +810,13 @@ struct RuntimeObject {
     interaction: Option<Interaction>,
     can_animate: bool,
     animation: Option<(Animation, f64)>,
-    sprite_time: Option<f64>,
+    sprite_sheet: Option<SpriteSheet>,
+    sprite_animation: Option<(SpriteSheet, f64)>,
 }
 
 impl RuntimeObject {
     fn new(object: &Object, physics: &mut Physics) -> Self {
+        let sprite_sheet = object.sprite.and_then(|sprite| sprite.sheet);
         Self {
             uuid: object.uuid,
             parent: object.parent,
@@ -835,11 +844,10 @@ impl RuntimeObject {
             interaction: object.interaction.clone(),
             can_animate: object.mesh.is_some() && object.sprite.is_none() && object.has_renderer(),
             animation: object.animation.map(|animation| (animation, 0.0)),
-            sprite_time: object
-                .sprite
-                .and_then(|sprite| sprite.sheet)
+            sprite_sheet,
+            sprite_animation: sprite_sheet
                 .filter(|sheet| sheet.frames > 1)
-                .map(|_| 0.0),
+                .map(|sheet| (sheet, 0.0)),
         }
     }
 
@@ -861,7 +869,10 @@ impl RuntimeObject {
                 self.kinematic_target
                     .as_mut()
                     .unwrap_or(&mut self.transform),
-                self.body.map(|(_, motion)| motion),
+                script::ActorComponents {
+                    motion: self.body.map(|(_, motion)| motion),
+                    sprite_sheet: self.sprite_sheet,
+                },
                 callback,
             );
             if let Some((handle, Motion::Dynamic)) = self.body {
@@ -876,6 +887,14 @@ impl RuntimeObject {
                 animation.clip = clip;
                 animation.looping = looping;
                 self.animation = Some((animation, 0.0));
+            }
+            if let Some(clip) = commands.sprite_animation
+                && self
+                    .sprite_animation
+                    .map_or(self.sprite_sheet, |(sheet, _)| Some(sheet))
+                    != Some(clip)
+            {
+                self.sprite_animation = Some((clip, 0.0));
             }
             let available = MAX_WORLD_COMMANDS.saturating_sub(world_commands.len());
             world_commands.extend(commands.world.into_iter().take(available));
@@ -1609,7 +1628,37 @@ impl Runtime {
             }
         }
         let inactive = self.inactive.borrow();
-        if self.physics.count() != 0 || self.scripts.is_some() {
+        let neutral = GameInput::default();
+        let input_for = |id| {
+            self.player_inputs
+                .get(&id)
+                .map(AsRef::as_ref)
+                .or_else(|| {
+                    (self.player_inputs.is_empty() && self.primary_character == Some(id))
+                        .then_some(&self.input)
+                })
+                .unwrap_or(&neutral)
+        };
+        let alive = |id| {
+            self.health
+                .borrow()
+                .get(&id)
+                .is_none_or(|state| state.alive())
+        };
+        let planar = matches!(self.physics, Physics::Planar(_));
+        if planar {
+            for mut object in self.objects.iter_mut(&mut self.world) {
+                let id = object.uuid;
+                if let Some(character) = &mut object.character
+                    && character.is_side_scroller()
+                {
+                    character.pending_jump |= !inactive.contains(&id)
+                        && alive(id)
+                        && input_for(id).action(InputAction::Jump).pressed;
+                }
+            }
+        }
+        if planar || self.physics.count() != 0 || self.scripts.is_some() {
             self.accumulated += frame;
             let requested = (self.accumulated / STEP) as usize;
             self.accumulated -= requested as f32 * STEP;
@@ -1625,6 +1674,7 @@ impl Runtime {
                         );
                     }
                 }
+                let mut moving_platforms = false;
                 for mut object in self.objects.iter_mut(&mut self.world) {
                     if inactive.contains(&object.uuid) {
                         continue;
@@ -1638,7 +1688,19 @@ impl Runtime {
                                 * target.rotation)
                                 .normalize();
                         }
-                        self.physics.move_kinematic(body, *target);
+                        moving_platforms |= self.physics.move_kinematic(body, *target);
+                    }
+                }
+                if moving_platforms {
+                    for mut object in self.objects.iter_mut(&mut self.world) {
+                        if !inactive.contains(&object.uuid)
+                            && alive(object.uuid)
+                            && let Some(character) = &object.character
+                            && character.is_side_scroller()
+                        {
+                            object.transform.translation = character
+                                .follow_platform(&self.physics, object.transform.translation);
+                        }
                     }
                 }
                 if self.physics.count() > 0 {
@@ -1688,6 +1750,26 @@ impl Runtime {
                         }
                     }
                 }
+                if planar {
+                    for mut object in self.objects.iter_mut(&mut self.world) {
+                        let id = object.uuid;
+                        let transform = object.transform;
+                        if let Some(character) = &mut object.character
+                            && character.is_side_scroller()
+                        {
+                            let jump = std::mem::take(&mut character.pending_jump);
+                            if !inactive.contains(&id) && alive(id) {
+                                object.transform.translation = character.step(
+                                    &self.physics,
+                                    STEP,
+                                    transform.translation,
+                                    character.direction(input_for(id), Vec3::NEG_Z),
+                                    jump,
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
         if let Some(range) = &mut self.range {
@@ -1706,7 +1788,6 @@ impl Runtime {
             }
         }
         let rotation = Quat::from_axis_angle(spin_axis, frame * 0.7);
-        let neutral = GameInput::default();
         for mut object in self.objects.iter_mut(&mut self.world) {
             if inactive.contains(&object.uuid) {
                 continue;
@@ -1714,7 +1795,9 @@ impl Runtime {
             if let Some((animation, time)) = &mut object.animation {
                 *time += f64::from(frame * animation.speed);
             }
-            if let Some(time) = &mut object.sprite_time {
+            if let Some((sheet, time)) = &mut object.sprite_animation
+                && sheet.frames > 1
+            {
                 *time += f64::from(frame);
             }
             if let Some(pose) = self
@@ -1739,22 +1822,12 @@ impl Runtime {
                 );
             }
             let transform = object.transform;
-            let input = self
-                .player_inputs
-                .get(&object.uuid)
-                .map(AsRef::as_ref)
-                .or_else(|| {
-                    (self.player_inputs.is_empty() && self.primary_character == Some(object.uuid))
-                        .then_some(&self.input)
-                })
-                .unwrap_or(&neutral);
-            if self
-                .health
-                .borrow()
-                .get(&object.uuid)
-                .is_none_or(|state| state.alive())
+            let id = object.uuid;
+            if alive(id)
                 && let Some(character) = &mut object.character
+                && !(planar && character.is_side_scroller())
             {
+                let input = input_for(id);
                 object.transform.translation = character.step(
                     &self.physics,
                     frame,
@@ -1803,16 +1876,102 @@ impl Runtime {
             .filter_map(|object| object.animation.map(|animation| (object.uuid, animation)))
     }
 
-    pub fn animated_sprites(&mut self) -> impl Iterator<Item = (Uuid, f64)> + '_ {
+    pub fn animated_sprites(&mut self) -> impl Iterator<Item = (Uuid, (SpriteSheet, f64))> + '_ {
         self.objects
             .iter(&self.world)
-            .filter_map(|object| object.sprite_time.map(|time| (object.uuid, time)))
+            .filter_map(|object| object.sprite_animation.map(|clip| (object.uuid, clip)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sprite_clip_switches_play_once_and_rejects_frames_outside_the_atlas() {
+        let mut scene = Scene::default();
+        let texture = Uuid::new_v4();
+        let script = Uuid::new_v4();
+        scene.entities[0].script = Some(script);
+        scene.entities[0].sprite = Some(Sprite {
+            texture,
+            size: glam::Vec2::ONE,
+            billboard: Billboard::Fixed,
+            sheet: Some(SpriteSheet {
+                columns: 3,
+                rows: 1,
+                first_frame: 0,
+                frames: 1,
+                fps: 8.0,
+                looping: false,
+            }),
+            planar: None,
+        });
+        scene.assets.extend([
+            Asset {
+                id: texture,
+                name: "Atlas".into(),
+                kind: AssetKind::Texture,
+            },
+            Asset {
+                id: script,
+                name: "Sprite states".into(),
+                kind: AssetKind::Script,
+            },
+        ]);
+        scene.script_sources.insert(
+            script,
+            r#"
+            fn on_update(entity, dt) {
+                if input_down("MoveLeft") {
+                    play_sprite(entity, 3, 1, 10, false);
+                } else if input_down("MoveRight") {
+                    play_sprite(entity, 1, 2, 10, false);
+                } else {
+                    play_sprite(entity, 0, 1, 8, false);
+                }
+            }
+        "#
+            .into(),
+        );
+        let mut runtime = Runtime::new(&scene).unwrap();
+        runtime.start_scripts(&scene, &HashMap::new());
+        runtime.prepare_play();
+        let frame = |runtime: &mut Runtime| {
+            runtime
+                .animated_sprites()
+                .next()
+                .map(|(_, (clip, time))| clip.frame_index(time))
+        };
+        let right = GameInput {
+            right: true,
+            ..GameInput::default()
+        };
+        runtime.game_input(right.clone());
+        runtime.tick(0.1);
+        assert_eq!(frame(&mut runtime), Some(1));
+        for _ in 0..5 {
+            runtime.tick(0.1);
+        }
+        assert_eq!(frame(&mut runtime), Some(2));
+        runtime.game_input(GameInput::default());
+        runtime.tick(0.1);
+        assert_eq!(frame(&mut runtime), Some(0));
+        runtime.game_input(right);
+        runtime.tick(0.1);
+        assert_eq!(frame(&mut runtime), Some(1));
+        runtime.game_input(GameInput {
+            left: true,
+            ..GameInput::default()
+        });
+        runtime.tick(0.1);
+        assert_eq!(frame(&mut runtime), Some(2));
+        assert!(
+            runtime
+                .script_log()
+                .any(|line| line.contains("frames must fit the atlas"))
+        );
+    }
 
     #[test]
     fn game_state_crosses_scene_start_and_checkpoints_restore_progress_and_pose() {
@@ -2469,6 +2628,94 @@ mod tests {
         let path = directory.path().join("physics.ron");
         scene.save(&path).unwrap();
         assert_eq!(Scene::load(&path).unwrap(), scene);
+    }
+
+    #[test]
+    fn side_scroller_rides_a_scripted_platform_at_different_frame_rates() {
+        let mut scene = Scene::new(SceneDimension::TwoD);
+        let script = Uuid::new_v4();
+        scene.assets.push(Asset {
+            id: script,
+            name: "Platform motion".into(),
+            kind: AssetKind::Script,
+        });
+        scene.script_sources.insert(
+            script,
+            r#"
+                fn on_start(entity) { this.elapsed = 0.0; }
+                fn on_fixed_update(entity, dt) {
+                    this.elapsed += dt;
+                    let time = this.elapsed;
+                    set_position(entity, time * 2.0, sin(time) * 1.5, 0.0);
+                }
+            "#
+            .into(),
+        );
+        let mut platform = Object::cube("Platform".into(), Vec3::ZERO);
+        platform.spin = false;
+        platform.transform.scale = Vec3::new(1.2, 0.3, 1.0);
+        platform.body = Some(Body {
+            motion: Motion::Kinematic,
+            ..Default::default()
+        });
+        platform.script = Some(script);
+        let platform_id = platform.uuid;
+        scene.entities.push(platform);
+        let mut player = Object::cube("Rider".into(), Vec3::Y * 0.56);
+        player.character = Some(CharacterController {
+            mode: CharacterMode::SideScroller,
+            radius: 0.22,
+            height: 0.8,
+            origin_height: 0.4,
+            ..Default::default()
+        });
+        let player_id = player.uuid;
+        scene.entities.push(player);
+
+        let pose = |runtime: &mut Runtime, target| {
+            runtime
+                .extract()
+                .find(|(id, ..)| *id == target)
+                .unwrap()
+                .1
+                .translation
+        };
+        let mut offsets = Vec::new();
+        for (frame, frames) in [(STEP * 0.5, 360), (STEP, 180), (STEP * 3.0, 60)] {
+            let mut runtime = Runtime::new(&scene).unwrap();
+            runtime.start_scripts(&scene, &HashMap::new());
+            for _ in 0..frames {
+                runtime.tick(frame);
+            }
+            let player = pose(&mut runtime, player_id);
+            let platform = pose(&mut runtime, platform_id);
+            let offset = player - platform;
+            assert!(platform.x > 5.9, "{platform:?}");
+            assert!(
+                offset.x.abs() < 0.2 && (offset.y - 0.55).abs() < 0.08,
+                "{frame}: {offset:?}"
+            );
+            offsets.push(offset);
+            let mut input = GameInput::default();
+            input.actions[InputAction::Jump as usize].pressed = true;
+            runtime.game_input(input);
+            runtime.tick(frame);
+            runtime.game_input(GameInput::default());
+            for _ in 1..(STEP * 6.0 / frame).round() as usize {
+                runtime.tick(frame);
+            }
+            let jumped = pose(&mut runtime, player_id);
+            assert!(
+                (jumped.x - player.x).abs() < 0.07 && jumped.y > player.y + 0.13,
+                "{jumped:?}"
+            );
+        }
+        assert!(
+            offsets
+                .iter()
+                .all(|offset| offset.abs_diff_eq(offsets[0], 0.001)),
+            "{offsets:?}"
+        );
     }
 
     #[test]

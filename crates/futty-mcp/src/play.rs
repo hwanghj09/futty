@@ -699,6 +699,7 @@ impl Session {
             .extract()
             .map(|(id, transform, _)| (id, transform))
             .collect();
+        let sprites: HashMap<_, _> = self.runtime.animated_sprites().collect();
         let spawned = self.runtime.spawned_objects();
         let objects = if spawned.is_empty() {
             Cow::Borrowed(self.scene.entities.as_slice())
@@ -750,14 +751,23 @@ impl Session {
                 })
                 .take(MAX_VISIBLE)
                 .map(|(distance, position, object)| {
-                    json!({
+                    let mut entry = json!({
                         "id": object.uuid,
                         "name": object.name,
                         "tags": object.tags,
                         "position": position.to_array(),
                         "distance": distance,
                         "health": self.runtime.health_state(object.uuid),
-                    })
+                    });
+                    if let Some((sheet, time)) = sprites.get(&object.uuid).copied().or_else(|| {
+                        object
+                            .sprite
+                            .and_then(|sprite| sprite.sheet)
+                            .map(|sheet| (sheet, 0.0))
+                    }) {
+                        entry["sprite_frame"] = json!(sheet.frame_index(time));
+                    }
+                    entry
                 })
                 .collect::<Vec<_>>()
         };

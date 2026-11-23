@@ -251,6 +251,9 @@ fn runner_scene(path: &Path) -> Result<Scene, ErrorData> {
     player
         .script_fields
         .insert("fall_loss".into(), ScriptValue::Bool(true));
+    player
+        .script_fields
+        .insert("sprite_walk".into(), ScriptValue::Bool(true));
     scene.entities.push(player);
     for (index, x) in [-0.9, 5.6, 8.8].into_iter().enumerate() {
         let mut object = Object::cube(format!("Coin {}", index + 1), Vec3::new(x, 0.55, 0.0));

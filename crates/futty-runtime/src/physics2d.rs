@@ -2,7 +2,7 @@ use std::{collections::VecDeque, sync::mpsc};
 
 use futty_core::Transform;
 use glam::{EulerRot, Quat, Vec3};
-use rapier2d::{control::KinematicCharacterController, prelude::*};
+use rapier2d::{control::KinematicCharacterController, parry::query::ShapeCastOptions, prelude::*};
 use uuid::Uuid;
 
 use super::{Body, Motion, PhysicsEvent, RayHit, STEP};
@@ -17,6 +17,7 @@ fn planar_pose(transform: Transform) -> Pose {
 
 pub(crate) struct PlanarPhysics {
     world: PhysicsWorld,
+    query_bodies_without_velocity: RigidBodySet,
     collector: ChannelEventCollector,
     incoming: mpsc::Receiver<CollisionEvent>,
     events: VecDeque<PhysicsEvent>,
@@ -37,6 +38,7 @@ impl PlanarPhysics {
         };
         Self {
             world,
+            query_bodies_without_velocity: RigidBodySet::new(),
             collector: ChannelEventCollector::new(sender, mpsc::channel().0, mpsc::channel().0),
             incoming,
             events: VecDeque::new(),
@@ -59,29 +61,41 @@ impl PlanarPhysics {
         .gravity_scale(config.gravity_scale)
         .pose(planar_pose(transform));
         let half = config.size * transform.scale * 0.5;
-        let collider = ColliderBuilder::cuboid(half.x, half.y)
-            .translation((config.center * transform.scale).truncate())
-            .mass(config.mass)
-            .friction(config.friction)
-            .restitution(config.restitution)
-            .collision_groups(InteractionGroups::new(
-                Group::from_bits_truncate(1 << (config.layers.layer - 1)),
-                Group::from_bits_truncate(config.layers.mask),
-                InteractionTestMode::And,
-            ))
-            .sensor(config.sensor)
-            .user_data(id.as_u128())
-            .active_events(ActiveEvents::COLLISION_EVENTS)
-            .active_collision_types(if config.sensor {
-                ActiveCollisionTypes::all()
-            } else {
-                ActiveCollisionTypes::default()
-            });
+        let collider = match config.planar_round_extents(transform.scale) {
+            Some((radius, 0.0)) => ColliderBuilder::ball(radius),
+            Some((radius, segment)) => ColliderBuilder::capsule_y(segment, radius),
+            None => ColliderBuilder::cuboid(half.x, half.y),
+        }
+        .translation((config.center * transform.scale).truncate())
+        .mass(config.mass)
+        .friction(config.friction)
+        .restitution(config.restitution)
+        .collision_groups(InteractionGroups::new(
+            Group::from_bits_truncate(1 << (config.layers.layer - 1)),
+            Group::from_bits_truncate(config.layers.mask),
+            InteractionTestMode::And,
+        ))
+        .sensor(config.sensor)
+        .user_data(id.as_u128())
+        .active_events(ActiveEvents::COLLISION_EVENTS)
+        .active_collision_types(if config.sensor {
+            ActiveCollisionTypes::all()
+        } else {
+            ActiveCollisionTypes::default()
+        });
         self.world.insert(body, collider).0
     }
 
-    pub(crate) fn move_kinematic(&mut self, handle: RigidBodyHandle, target: Transform) {
-        self.world.bodies[handle].set_next_kinematic_position(planar_pose(target));
+    pub(crate) fn move_kinematic(&mut self, handle: RigidBodyHandle, target: Transform) -> bool {
+        let target = planar_pose(target);
+        let body = &mut self.world.bodies[handle];
+        body.set_next_kinematic_position(target);
+        target.translation != body.position().translation
+            && body.is_enabled()
+            && body
+                .colliders()
+                .iter()
+                .any(|&collider| !self.world.colliders[collider].is_sensor())
     }
 
     pub(crate) fn apply_commands(
@@ -191,26 +205,77 @@ impl PlanarPhysics {
         size: [f32; 2],
         delta: Vec3,
         mask: u32,
+        side_scroller: bool,
     ) -> (Vec3, bool) {
         if self.count() > 0 && !self.prepared {
             return (Vec3::ZERO, false);
         }
         let [radius, height] = size;
         let capsule = Capsule::new_y(height * 0.5 - radius, radius);
-        let controller = KinematicCharacterController {
-            // Leave enough separation for the next cast when the capsule touches a wall and floor.
-            normal_nudge_factor: 0.001,
-            ..Default::default()
-        };
-        let result = controller.move_shape(
+        let mut queries = self.world.query_pipeline_with_filter(query_filter(mask));
+        if side_scroller {
+            // Side-scrollers use actual platform displacement before the physics step.
+            queries.bodies = &self.query_bodies_without_velocity;
+        }
+        let result = character_controller().move_shape(
             dt,
-            &self.world.query_pipeline_with_filter(query_filter(mask)),
+            &queries,
             &capsule,
             &Pose::from_translation(center.truncate()),
             delta.truncate(),
             |_| {},
         );
         (result.translation.extend(0.0), result.grounded)
+    }
+
+    pub(crate) fn platform_carry(&self, center: Vec3, size: [f32; 2], mask: u32) -> Vec3 {
+        if !self.prepared {
+            return Vec3::ZERO;
+        }
+        let [radius, height] = size;
+        let capsule = Capsule::new_y(height * 0.5 - radius, radius);
+        let pose = Pose::from_translation(center.truncate());
+        let mut queries = self.world.query_pipeline_with_filter(query_filter(mask));
+        let Some((support, hit)) = queries.cast_shape(
+            &pose,
+            -Vector::Y,
+            &capsule,
+            ShapeCastOptions {
+                max_time_of_impact: 0.06,
+                stop_at_penetration: false,
+                compute_impact_geometry_on_penetration: true,
+                ..Default::default()
+            },
+        ) else {
+            return Vec3::ZERO;
+        };
+        let Some(body) = self.world.colliders[support]
+            .parent()
+            .and_then(|id| self.world.bodies.get(id))
+            .filter(|body| body.is_kinematic() && hit.normal1.y >= std::f32::consts::FRAC_1_SQRT_2)
+        else {
+            return Vec3::ZERO;
+        };
+        let displacement = body.next_position().translation - body.position().translation;
+        if displacement == Vector::ZERO {
+            return Vec3::ZERO;
+        }
+        queries.bodies = &self.query_bodies_without_velocity;
+        queries.filter = queries.filter.exclude_collider(support);
+        // Keep the controller's skin between the capsule and the moving surface.
+        let carry = displacement + Vector::Y * (0.006 - hit.time_of_impact);
+        character_controller()
+            .move_shape(STEP, &queries, &capsule, &pose, carry, |_| {})
+            .translation
+            .extend(0.0)
+    }
+}
+
+fn character_controller() -> KinematicCharacterController {
+    KinematicCharacterController {
+        // Separate from adjacent floor and wall colliders before the next cast.
+        normal_nudge_factor: 0.001,
+        ..Default::default()
     }
 }
 
@@ -227,6 +292,84 @@ fn query_filter(mask: u32) -> QueryFilter<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_enabled_solid_kinematics_translating_in_xy_require_carry_queries() {
+        let mut physics = PlanarPhysics::new();
+        let origin = Transform::default();
+        let config = Body {
+            motion: Motion::Kinematic,
+            ..Default::default()
+        };
+        let platform = physics.insert(Uuid::new_v4(), origin, config);
+        let sensor = physics.insert(
+            Uuid::new_v4(),
+            origin,
+            Body {
+                sensor: true,
+                ..config
+            },
+        );
+        let depth_and_rotation = Transform {
+            translation: Vec3::Z,
+            rotation: Quat::from_rotation_z(0.5),
+            ..origin
+        };
+        let moved = Transform {
+            translation: Vec3::X,
+            ..origin
+        };
+
+        assert!(!physics.move_kinematic(platform, origin));
+        assert!(!physics.move_kinematic(platform, depth_and_rotation));
+        assert!(!physics.move_kinematic(sensor, moved));
+        assert!(physics.move_kinematic(platform, moved));
+        physics.step();
+        assert!(!physics.move_kinematic(platform, moved));
+        physics.set_enabled(platform, false);
+        assert!(!physics.move_kinematic(platform, origin));
+    }
+    use crate::BodyShape;
+
+    #[test]
+    fn raycasts_use_the_actual_circle_and_capsule_curves() {
+        let mut physics = PlanarPhysics::new();
+        let circle = Uuid::new_v4();
+        let capsule = Uuid::new_v4();
+        physics.insert(
+            circle,
+            Transform::default(),
+            Body {
+                motion: Motion::Fixed,
+                shape: BodyShape::Circle,
+                ..Body::default()
+            },
+        );
+        physics.insert(
+            capsule,
+            Transform {
+                translation: Vec3::X * 3.0,
+                ..Transform::default()
+            },
+            Body {
+                motion: Motion::Fixed,
+                shape: BodyShape::Capsule,
+                size: Vec3::new(1.0, 2.0, 1.0),
+                ..Body::default()
+            },
+        );
+        physics.prepare_queries();
+        let ray = |x| physics.raycast(Vec3::new(x, 2.0, 0.0), Vec3::NEG_Y, 4.0, u32::MAX);
+        let round = ray(0.45).unwrap();
+        let tall = ray(3.45).unwrap();
+        assert_eq!(round.entity, circle);
+        assert_eq!(tall.entity, capsule);
+        let curved_height = (0.25_f32 - 0.45 * 0.45).sqrt();
+        assert!((round.position.y - curved_height).abs() < 1e-4);
+        assert!((tall.position.y - curved_height - 0.5).abs() < 1e-4);
+        assert!(round.normal.x > 0.8 && tall.normal.x > 0.8);
+        assert!(ray(0.51).is_none() && ray(3.51).is_none());
+    }
 
     #[test]
     fn planar_body_lands_and_triggers_across_render_depths() {
@@ -263,7 +406,14 @@ mod tests {
             translation: Vec3::new(0.0, 3.0, 2.0),
             ..Transform::default()
         };
-        let body = physics.insert(falling, pose, Body::default());
+        let body = physics.insert(
+            falling,
+            pose,
+            Body {
+                shape: BodyShape::Circle,
+                ..Body::default()
+            },
+        );
         physics.prepare_queries();
         for _ in 0..120 {
             physics.step();

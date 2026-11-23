@@ -13,7 +13,7 @@ use rhai::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{GameOutcome, Motion};
+use crate::{GameOutcome, Motion, SpriteSheet};
 
 type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
 pub(crate) type QueryPoses = HashMap<Uuid, (Option<Uuid>, Transform)>;
@@ -190,12 +190,19 @@ pub(crate) struct Commands {
     pub impulse: Vec3,
     pub world: Vec<WorldCommand>,
     pub animation: Option<(u32, bool)>,
+    pub sprite_animation: Option<SpriteSheet>,
+}
+
+pub(crate) struct ActorComponents {
+    pub motion: Option<Motion>,
+    pub sprite_sheet: Option<SpriteSheet>,
 }
 
 #[derive(Default)]
 struct Effects {
     entity: Option<Uuid>,
     motion: Option<Motion>,
+    sprite_sheet: Option<SpriteSheet>,
     pose: Transform,
     tick: u64,
     timers: Rc<RefCell<BTreeMap<String, u64>>>,
@@ -428,6 +435,37 @@ impl Scripts {
                     );
                 }
                 effects.physics.animation = Some((clip as u32, looping));
+                Ok(())
+            },
+        );
+        let sprite_playback = effects.clone();
+        engine.register_fn(
+            "play_sprite",
+            move |entity: EntityRef,
+                  first: rhai::INT,
+                  frames: rhai::INT,
+                  fps: Dynamic,
+                  looping: bool|
+                  -> RhaiResult<()> {
+                let mut effects = sprite_playback.borrow_mut();
+                check_owner(&effects, entity)?;
+                let atlas = effects
+                    .sprite_sheet
+                    .ok_or("Expected a sprite with an authored atlas")?;
+                let clip = SpriteSheet {
+                    first_frame: u16::try_from(first).map_err(|_| "Invalid first sprite frame")?,
+                    frames: u16::try_from(frames).map_err(|_| "Invalid sprite frame count")?,
+                    fps: bounded(&fps, 60.0)?,
+                    looping,
+                    ..atlas
+                };
+                if !clip.valid() {
+                    return Err(
+                        "Sprite frames must fit the atlas and playback speed must be 1–60 fps"
+                            .into(),
+                    );
+                }
+                effects.physics.sprite_animation = Some(clip);
                 Ok(())
             },
         );
@@ -889,7 +927,7 @@ impl Scripts {
         script: Uuid,
         label: &str,
         transform: &mut Transform,
-        motion: Option<Motion>,
+        components: ActorComponents,
         callback: Callback,
     ) -> Commands {
         if self.disabled.contains(&id) {
@@ -914,7 +952,8 @@ impl Scripts {
         };
         *self.effects.borrow_mut() = Effects {
             entity: Some(id),
-            motion,
+            motion: components.motion,
+            sprite_sheet: components.sprite_sheet,
             pose: *transform,
             input: self.player_inputs.get(&id).unwrap_or(&self.input).clone(),
             fields: instance.fields.clone(),

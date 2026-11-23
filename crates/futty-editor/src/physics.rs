@@ -1,12 +1,20 @@
 use eframe::egui;
 use egui::RichText;
-use futty_runtime::{Body, CharacterController, CharacterMode, Health, Motion, Object, Scene};
+use futty_runtime::{
+    Body, BodyShape, CharacterController, CharacterMode, Health, Motion, Object, Scene,
+    SceneDimension,
+};
 use glam::{Quat, Vec3};
 use uuid::Uuid;
 
 use crate::{FOCUS, MUTED, WARNING, vector_fields};
 
-pub fn inspector(ui: &mut egui::Ui, object: &mut Object, [min, max]: [Vec3; 2]) {
+pub fn inspector(
+    ui: &mut egui::Ui,
+    object: &mut Object,
+    [min, max]: [Vec3; 2],
+    dimension: SceneDimension,
+) {
     ui.add_space(10.0);
     ui.label(RichText::new("Physics").strong());
     ui.separator();
@@ -43,21 +51,47 @@ pub fn inspector(ui: &mut egui::Ui, object: &mut Object, [min, max]: [Vec3; 2]) 
         scalar_field(ui, "Friction", &mut body.friction, 0.0..=5.0);
         scalar_field(ui, "Restitution", &mut body.restitution, 0.0..=1.0);
         ui.horizontal(|ui| {
-            ui.label("Box Collider");
+            if dimension == SceneDimension::TwoD {
+                egui::ComboBox::from_id_salt("body-shape")
+                    .selected_text(body.shape.label())
+                    .show_ui(ui, |ui| {
+                        for shape in [BodyShape::Box, BodyShape::Circle, BodyShape::Capsule] {
+                            ui.selectable_value(&mut body.shape, shape, shape.label());
+                        }
+                    });
+            } else {
+                ui.label("Box Collider");
+            }
             if ui.small_button("Fit to mesh").clicked() {
                 let fitted = fitted_box(min, max);
                 body.size = fitted.size;
                 body.center = fitted.center;
             }
         });
-        vector_fields(ui, "Local size", &mut body.size, 0.01..=20_000.0, 0.025);
-        vector_fields(
-            ui,
-            "Local center",
-            &mut body.center,
-            -20_000.0..=20_000.0,
-            0.025,
-        );
+        match (dimension, body.shape) {
+            (SceneDimension::TwoD, BodyShape::Circle) => {
+                scalar_field(ui, "Diameter", &mut body.size.x, 0.01..=20_000.0);
+            }
+            (SceneDimension::TwoD, _) => {
+                scalar_field(ui, "Width", &mut body.size.x, 0.01..=20_000.0);
+                scalar_field(ui, "Height", &mut body.size.y, 0.01..=20_000.0);
+            }
+            _ => {
+                vector_fields(ui, "Local size", &mut body.size, 0.01..=20_000.0, 0.025);
+            }
+        }
+        if dimension == SceneDimension::TwoD {
+            scalar_field(ui, "Center X", &mut body.center.x, -20_000.0..=20_000.0);
+            scalar_field(ui, "Center Y", &mut body.center.y, -20_000.0..=20_000.0);
+        } else {
+            vector_fields(
+                ui,
+                "Local center",
+                &mut body.center,
+                -20_000.0..=20_000.0,
+                0.025,
+            );
+        }
     }
     let mut controlled = object.character.is_some();
     if ui

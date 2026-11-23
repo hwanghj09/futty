@@ -1,0 +1,9 @@
+(
+    format: 1,
+    scenes: (
+        start: "main",
+        scenes: {
+            "main": "Moving Platform Lab.futty.scene.ron",
+        },
+    ),
+)

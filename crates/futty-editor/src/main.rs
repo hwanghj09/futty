@@ -1322,6 +1322,7 @@ impl Editor {
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
+        let dimension = self.doc.scene.dimension;
         if self.material_inspector(ui) || self.prefab_inspector(ui, action) {
             return;
         }
@@ -1596,7 +1597,7 @@ impl Editor {
                                 .map(|point| point * sprite.size.extend(1.0))
                         },
                     );
-                    physics::inspector(ui, object, bounds);
+                    physics::inspector(ui, object, bounds, dimension);
                 });
             })
         });
@@ -1813,7 +1814,14 @@ impl Editor {
                     .filter(|(_, object)| selected.contains(&object.uuid))
                 {
                     if let Some(body) = object.body {
-                        viewport::paint_collider(ui, rect, camera, frame.world[index], body);
+                        viewport::paint_collider(
+                            ui,
+                            rect,
+                            camera,
+                            frame.world[index],
+                            body,
+                            scene.dimension,
+                        );
                     }
                 }
             }

@@ -8,8 +8,8 @@ use eframe::{egui, egui_wgpu::RenderState, wgpu};
 use egui::{Color32, Pos2, Rect, Vec2};
 use futty_core::{Asset, AssetKind, Camera, Primitive};
 use futty_render::{RenderScene, Renderer, Targets};
-use futty_runtime::{Body, Hierarchy, Object, Sprite};
-use glam::{Mat4, Vec3};
+use futty_runtime::{Body, Hierarchy, Object, SceneDimension, Sprite};
+use glam::{EulerRot, Mat4, Quat, Vec3};
 use uuid::Uuid;
 
 pub const AXES: [(&str, Color32); 3] = [
@@ -32,7 +32,7 @@ pub struct Viewport {
     gpu: RenderState,
     renderer: Renderer,
     hud_images: HashMap<Uuid, egui::TextureHandle>,
-    views: [(Targets, egui::TextureId); 2],
+    views: [(Targets, egui::TextureId, wgpu::FilterMode); 2],
     drag: Option<AxisDrag>,
 }
 
@@ -46,7 +46,7 @@ struct AxisDrag {
 impl Drop for Viewport {
     fn drop(&mut self) {
         let mut renderer = self.gpu.renderer.write();
-        for (_, image) in &self.views {
+        for (_, image, _) in &self.views {
             renderer.free_texture(image);
         }
     }
@@ -66,7 +66,7 @@ impl Viewport {
                 &targets.color,
                 wgpu::FilterMode::Linear,
             );
-            (targets, image)
+            (targets, image, wgpu::FilterMode::Linear)
         });
         Self {
             camera: Camera::default(),
@@ -160,25 +160,44 @@ impl Viewport {
         let scale = ui.pixels_per_point();
         let size =
             [rect.width(), rect.height()].map(|side| ((side * scale).round() as u32).clamp(1, max));
-        let (targets, image) = &mut self.views[usize::from(game)];
-        if targets.size != size {
+        let (targets, image, current_filter) = &mut self.views[usize::from(game)];
+        let pixel_grid = scene.pixel_view.is_some();
+        let filter = if pixel_grid {
+            wgpu::FilterMode::Nearest
+        } else {
+            wgpu::FilterMode::Linear
+        };
+        let resized = targets.size != size;
+        if resized {
             *targets = Targets::new(&self.gpu.device, size);
+        }
+        if resized || *current_filter != filter {
             self.gpu
                 .renderer
                 .write()
                 .update_egui_texture_from_wgpu_texture(
                     &self.gpu.device,
                     &targets.color,
-                    wgpu::FilterMode::Linear,
+                    filter,
                     *image,
                 );
+            *current_filter = filter;
         }
         scene.grid = self.grid && !game;
         self.renderer
             .draw(&self.gpu.device, &self.gpu.queue, targets, scene);
+        let image_rect = if pixel_grid {
+            let min = Pos2::new(
+                (rect.min.x * scale).round() / scale,
+                (rect.min.y * scale).round() / scale,
+            );
+            Rect::from_min_size(min, Vec2::new(size[0] as f32, size[1] as f32) / scale)
+        } else {
+            rect
+        };
         ui.painter().image(
             *image,
-            rect,
+            image_rect,
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::WHITE,
         );
@@ -432,19 +451,64 @@ fn orbit(camera: &mut Camera, distance: f32, delta: Vec2) {
     camera.eye = pivot - camera.forward() * distance;
 }
 
-pub fn paint_collider(ui: &egui::Ui, rect: Rect, camera: Camera, world: Mat4, body: Body) {
+pub fn paint_collider(
+    ui: &egui::Ui,
+    rect: Rect,
+    camera: Camera,
+    world: Mat4,
+    body: Body,
+    dimension: SceneDimension,
+) {
     let vp = camera.view_projection(rect.aspect_ratio());
-    let corners: [_; 8] = std::array::from_fn(|index| {
-        let side = |bit| if index & bit == 0 { -0.5 } else { 0.5 };
-        let point = body.center + body.size * Vec3::new(side(1), side(2), side(4));
-        project(vp, rect, world.transform_point3(point))
-    });
     let color = if body.sensor {
         crate::WARNING
     } else {
         crate::FOCUS
     };
     let painter = ui.painter().with_clip_rect(rect);
+    if dimension == SceneDimension::TwoD {
+        let (scale, rotation, origin) = world.to_scale_rotation_translation();
+        let rotation = Quat::from_rotation_z(rotation.to_euler(EulerRot::ZYX).0);
+        let center = (body.center * scale).with_z(0.0);
+        let half = body.size * scale * 0.5;
+        let outline: Vec<_> = if let Some((radius, segment)) = body.planar_round_extents(scale) {
+            [segment, -segment]
+                .into_iter()
+                .enumerate()
+                .flat_map(|(arc, offset)| {
+                    (0..=16).map(move |i| {
+                        let angle = (arc as f32 + i as f32 / 16.0) * std::f32::consts::PI;
+                        let (y, x) = angle.sin_cos();
+                        Vec3::new(x * radius, y * radius + offset, 0.0)
+                    })
+                })
+                .collect()
+        } else {
+            [
+                (-half.x, -half.y),
+                (half.x, -half.y),
+                (half.x, half.y),
+                (-half.x, half.y),
+            ]
+            .map(|(x, y)| Vec3::new(x, y, 0.0))
+            .into()
+        };
+        let points: Vec<_> = outline
+            .into_iter()
+            .map(|point| project(vp, rect, origin + rotation * (center + point)))
+            .collect();
+        for (&start, &end) in points.iter().zip(points.iter().cycle().skip(1)) {
+            if let (Some(a), Some(b)) = (start, end) {
+                painter.line_segment([a, b], (1.1, color));
+            }
+        }
+        return;
+    }
+    let corners: [_; 8] = std::array::from_fn(|index| {
+        let side = |bit| if index & bit == 0 { -0.5 } else { 0.5 };
+        let point = body.center + body.size * Vec3::new(side(1), side(2), side(4));
+        project(vp, rect, world.transform_point3(point))
+    });
     for (start, point) in corners.iter().enumerate() {
         for bit in [1, 2, 4] {
             if start & bit == 0

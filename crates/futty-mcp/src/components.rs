@@ -1,6 +1,6 @@
 use futty_core::{Light, LightKind};
 use futty_runtime::{
-    Body, CharacterController, CharacterMode, Health, Interaction, Motion, Object,
+    Body, BodyShape, CharacterController, CharacterMode, Health, Interaction, Motion, Object,
 };
 use rmcp::{ErrorData, schemars};
 use serde::Deserialize;
@@ -79,6 +79,9 @@ pub(crate) enum ComponentPatch {
     },
     Body {
         motion: Option<BodyMotion>,
+        /// box, circle or capsule. Circle and capsule require a TwoD scene.
+        #[schemars(with = "Option<String>")]
+        shape: Option<BodyShape>,
         size: Option<[f32; 3]>,
         center: Option<[f32; 3]>,
         mass: Option<f32>,
@@ -143,6 +146,7 @@ impl ComponentPatch {
             }
             Self::Body {
                 motion,
+                shape,
                 size,
                 center,
                 mass,
@@ -165,6 +169,7 @@ impl ComponentPatch {
                 };
                 object.body = Some(Body {
                     motion,
+                    shape: shape.unwrap_or(current.shape),
                     size: size.map_or(current.size, Into::into),
                     center: center.map_or(current.center, Into::into),
                     mass: mass.unwrap_or(current.mass),

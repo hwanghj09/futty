@@ -2,7 +2,7 @@ use std::{collections::HashMap, ops::Range};
 
 use bytemuck::{Pod, Zeroable};
 use futty_assets::{AnimationSample, Clip, Model, Part, Rig, Vertex};
-use futty_core::{Light, LightKind, Primitive, Surface};
+use futty_core::{CameraView, Light, LightKind, Primitive, Surface};
 use glam::{Mat4, Vec3};
 use uuid::Uuid;
 use wgpu::{self as gpu, util::DeviceExt};
@@ -132,7 +132,7 @@ pub struct DrawObject {
     pub texture: Option<Uuid>,
     /// Sprite UV rectangle as [left, top, width, height].
     pub sprite: Option<[f32; 4]>,
-    pub sprite_layer: i16,
+    pub sprite_layer: Option<i16>,
     pub surface: Surface,
     pub material_override: bool,
     pub animation: Option<AnimationSample>,
@@ -149,6 +149,7 @@ pub struct LightInstance {
 pub struct RenderScene<'a> {
     pub view_projection: Mat4,
     pub camera_position: Vec3,
+    pub pixel_view: Option<CameraView>,
     pub sky_clip_to_world: Option<Mat4>,
     pub objects: &'a [DrawObject],
     pub lights: &'a [LightInstance],
@@ -658,8 +659,16 @@ impl Renderer {
         device: &gpu::Device,
         queue: &gpu::Queue,
         targets: &Targets,
-        scene: RenderScene<'_>,
+        mut scene: RenderScene<'_>,
     ) {
+        let pixel_view = scene
+            .pixel_view
+            .map(|view| view.pixel_aligned(targets.size));
+        if let Some(view) = pixel_view {
+            let [width, height] = targets.size;
+            scene.view_projection = view.view_projection(width as f32 / height as f32);
+            scene.camera_position = view.eye;
+        }
         let (uniform, shadow_projection) = SceneUniform::new(&scene, &self.shadow, targets.size);
         let RenderScene {
             view_projection,
@@ -750,10 +759,20 @@ impl Renderer {
         // shortcut: intersecting sprites sort by center depth, revisit if scenes need per-pixel ordering.
         sprites.sort_by(|a, b| {
             a.1.sprite_layer
-                .cmp(&b.1.sprite_layer)
+                .unwrap_or(0)
+                .cmp(&b.1.sprite_layer.unwrap_or(0))
                 .then_with(|| b.0.total_cmp(&a.0))
         });
         for (_, object, uv) in sprites {
+            let mut matrix = object.matrix;
+            let grid = pixel_view.filter(|_| object.sprite_layer.is_some());
+            if let Some(view) = grid {
+                let corner = matrix.transform_point3(Vec3::new(-0.5, 0.5, 0.0));
+                matrix.w_axis += (view.snap_to_pixel_grid(corner) - corner).extend(0.0);
+            }
+            // Sprite modes 4/5 use linear filtering; 6/7 use nearest-neighbor texels.
+            let mode =
+                if grid.is_some() { 6.0 } else { 4.0 } + f32::from(u8::from(object.selected));
             let texture = object
                 .texture
                 .and_then(|id| self.textures.get(&id))
@@ -764,13 +783,8 @@ impl Renderer {
                 [0.25, 0.18, 0.12]
             };
             instances.push(Instance {
-                model: object.matrix.to_cols_array_2d(),
-                color: [
-                    color[0],
-                    color[1],
-                    color[2],
-                    if object.selected { 5.0 } else { 4.0 },
-                ],
+                model: matrix.to_cols_array_2d(),
+                color: [color[0], color[1], color[2], mode],
                 surface: uv,
             });
             draws.push(Draw {
@@ -980,6 +994,7 @@ mod tests {
         RenderScene {
             view_projection,
             camera_position: Vec3::ZERO,
+            pixel_view: None,
             sky_clip_to_world: None,
             objects,
             lights: &[],
@@ -1029,7 +1044,7 @@ mod tests {
             mesh: None,
             texture: None,
             sprite: None,
-            sprite_layer: 0,
+            sprite_layer: None,
             primitive: Primitive::Cube,
             surface: Surface::default(),
             material_override: true,
@@ -1065,7 +1080,7 @@ mod tests {
             mesh: None,
             texture: None,
             sprite: None,
-            sprite_layer: 0,
+            sprite_layer: None,
             primitive: Primitive::Cube,
             surface: Surface::default(),
             material_override: true,
@@ -1084,6 +1099,7 @@ mod tests {
                 RenderScene {
                     view_projection: camera.view_projection(1.0),
                     camera_position: camera.eye,
+                    pixel_view: None,
                     sky_clip_to_world: None,
                     objects: std::slice::from_ref(object),
                     lights,
@@ -1140,7 +1156,7 @@ mod tests {
             mesh: None,
             texture: None,
             sprite: None,
-            sprite_layer: 0,
+            sprite_layer: None,
             primitive: Primitive::Cube,
         };
         let mut sampled = |lights: &[LightInstance]| {
@@ -1151,6 +1167,7 @@ mod tests {
                 RenderScene {
                     view_projection: view,
                     camera_position: Vec3::Z * 3.0,
+                    pixel_view: None,
                     sky_clip_to_world: None,
                     objects: std::slice::from_ref(&cube),
                     lights,
@@ -1213,7 +1230,7 @@ mod tests {
             mesh: None,
             texture: None,
             sprite: None,
-            sprite_layer: 0,
+            sprite_layer: None,
             primitive,
         };
         let objects = [
@@ -1237,6 +1254,7 @@ mod tests {
                 RenderScene {
                     view_projection,
                     camera_position: camera.eye,
+                    pixel_view: None,
                     sky_clip_to_world: None,
                     objects: &objects,
                     lights: std::slice::from_ref(&source),
@@ -1261,6 +1279,63 @@ mod tests {
         sun.shadow_distance = 2.0;
         let [outside, _] = frame(sun);
         assert!(outside.abs_diff(clear) <= 2);
+    }
+
+    #[test]
+    #[ignore = "requires a local graphics adapter"]
+    fn pixel_grid_renders_nearest_texels_on_integer_boundaries() {
+        let instance =
+            gpu::Instance::new(gpu::InstanceDescriptor::new_without_display_handle().with_env());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let mut renderer = Renderer::new(&device, &queue);
+        let texture = Uuid::new_v4();
+        renderer.upload_image(
+            &device,
+            &queue,
+            texture,
+            [2, 1],
+            &[255, 0, 0, 255, 0, 255, 0, 255],
+        );
+        let camera = CameraView {
+            eye: Vec3::new(0.01, 0.0, 5.0),
+            rotation: glam::Quat::IDENTITY,
+            lens: futty_core::CameraLens {
+                projection: futty_core::Projection::Orthographic,
+                size: 0.5,
+                pixels_per_unit: Some(16),
+                ..Default::default()
+            },
+        };
+        let sprite = DrawObject {
+            matrix: Mat4::from_translation(Vec3::new(0.01, 0.03125, 0.0))
+                * Mat4::from_scale(Vec3::new(0.125, 0.0625, 1.0)),
+            color: [1.0; 3],
+            selected: false,
+            mesh: None,
+            primitive: Primitive::Cube,
+            texture: Some(texture),
+            sprite: Some([0.0, 0.0, 1.0, 1.0]),
+            sprite_layer: Some(0),
+            surface: Surface::default(),
+            material_override: false,
+            animation: None,
+        };
+        let targets = Targets::new(&device, [128, 128]);
+        renderer.draw(
+            &device,
+            &queue,
+            &targets,
+            RenderScene {
+                pixel_view: Some(camera),
+                ..default_scene(camera.view_projection(1.0), &[sprite])
+            },
+        );
+        let image = pixels(&device, &queue, &targets);
+        let at = |x: usize| &image[(60 * 128 + x) * 4..(60 * 128 + x) * 4 + 4];
+        assert_eq!(at(63), [255, 0, 0, 255]);
+        assert_eq!(at(64), [0, 255, 0, 255]);
     }
 
     #[test]
@@ -1297,7 +1372,7 @@ mod tests {
             mesh: None,
             texture: Some(texture),
             sprite: Some([0.0, 0.0, 1.0, 1.0]),
-            sprite_layer: 0,
+            sprite_layer: None,
             primitive: Primitive::Cube,
         };
         renderer.draw(&device, &queue, &targets, default_scene(camera, &[]));
@@ -1337,7 +1412,7 @@ mod tests {
         let higher = DrawObject {
             color: [1.0, 0.0, 0.0],
             texture: Some(white),
-            sprite_layer: 1,
+            sprite_layer: Some(1),
             ..sprite
         };
         renderer.draw(
@@ -1358,7 +1433,7 @@ mod tests {
             mesh: None,
             texture: None,
             sprite: None,
-            sprite_layer: 0,
+            sprite_layer: None,
             primitive: Primitive::Cube,
         };
         renderer.draw(
@@ -1408,7 +1483,7 @@ mod tests {
             mesh: Some(model_id),
             texture: None,
             sprite: None,
-            sprite_layer: 0,
+            sprite_layer: None,
             primitive: Primitive::Cube,
         };
         let camera = Camera::default().view_projection(1.0);

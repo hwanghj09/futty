@@ -1,5 +1,5 @@
 fn fields() {
-    #{ fall_loss: false }
+    #{ fall_loss: false, sprite_walk: false }
 }
 
 fn on_start(entity) {
@@ -22,6 +22,10 @@ fn on_update(entity, dt) {
         set_hud("objective", "You fell. Restart to try again.");
         finish_game("failure");
         return;
+    }
+    if param("sprite_walk") {
+        let moving = input_down("MoveLeft") || input_down("MoveRight");
+        play_sprite(entity, 0, if moving { 4 } else { 1 }, 8, moving);
     }
     for coin in find_nearby(entity, "coin", 0.95) {
         send_event(coin, "pickup");

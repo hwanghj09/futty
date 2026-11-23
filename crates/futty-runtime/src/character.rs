@@ -70,6 +70,7 @@ impl CharacterController {
 
 pub(crate) struct CharacterMotion {
     config: CharacterController,
+    pub(crate) pending_jump: bool,
     grounded: bool,
     vertical: f32,
     coyote_remaining: f32,
@@ -80,6 +81,7 @@ impl CharacterMotion {
     pub(crate) fn new(config: CharacterController) -> Self {
         Self {
             config,
+            pending_jump: false,
             grounded: false,
             vertical: 0.0,
             coyote_remaining: 0.0,
@@ -107,6 +109,26 @@ impl CharacterMotion {
 
     pub(crate) fn is_spatial(&self) -> bool {
         self.config.mode.is_spatial()
+    }
+
+    pub(crate) fn is_side_scroller(&self) -> bool {
+        self.config.mode == CharacterMode::SideScroller
+    }
+
+    pub(crate) fn follow_platform(&self, physics: &Physics, position: Vec3) -> Vec3 {
+        if self.vertical > 0.0
+            || (self.pending_jump && self.grounded && self.config.jump_speed > 0.0)
+        {
+            return position;
+        }
+        let config = self.config;
+        let center = position + Vec3::Y * (config.height * 0.5 - config.origin_height);
+        position
+            + physics.platform_carry(
+                center,
+                [config.radius, config.height],
+                config.collision_mask,
+            )
     }
 
     pub(crate) fn step(
@@ -157,6 +179,7 @@ impl CharacterMotion {
             [config.radius, config.height],
             desired,
             config.collision_mask,
+            self.is_side_scroller(),
         );
         if !config.mode.is_spatial() {
             moved.z = 0.0;

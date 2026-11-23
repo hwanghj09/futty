@@ -267,6 +267,8 @@ pub struct CameraLens {
     pub size: f32,
     pub near: f32,
     pub far: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixels_per_unit: Option<u16>,
 }
 
 impl Default for CameraLens {
@@ -277,6 +279,7 @@ impl Default for CameraLens {
             size: 5.0,
             near: 0.05,
             far: 250.0,
+            pixels_per_unit: None,
         }
     }
 }
@@ -288,6 +291,9 @@ impl CameraLens {
             && (0.01..=9_999.0).contains(&self.near)
             && self.far > self.near
             && self.far <= 10_000.0
+            && self
+                .pixels_per_unit
+                .is_none_or(|pixels| (1..=1024).contains(&pixels))
     }
 
     pub fn half_height(self, distance: f32) -> f32 {
@@ -306,6 +312,38 @@ pub struct CameraView {
 }
 
 impl CameraView {
+    pub fn pixel_aligned(mut self, size: [u32; 2]) -> Self {
+        let Some(pixels) = self
+            .lens
+            .pixels_per_unit
+            .filter(|_| self.lens.projection == Projection::Orthographic)
+        else {
+            return self;
+        };
+        let pixels = f32::from(pixels);
+        let height = size[1].max(1) as f32;
+        let scale = (height / (2.0 * self.lens.size * pixels)).round().max(1.0);
+        self.lens.size = height / (2.0 * pixels * scale);
+        self.eye = self.snap_to_pixel_grid(self.eye);
+        // At odd framebuffer dimensions its center is half a display pixel from an edge.
+        self.eye += (self.right() * (size[0] % 2) as f32 - self.up() * (size[1] % 2) as f32)
+            / (2.0 * pixels * scale);
+        self
+    }
+
+    pub fn snap_to_pixel_grid(self, position: Vec3) -> Vec3 {
+        let Some(pixels) = self.lens.pixels_per_unit else {
+            return position;
+        };
+        let pixels = f32::from(pixels);
+        let [right, up] = [self.right(), self.up()];
+        let correction = |axis: Vec3| {
+            let coordinate = position.dot(axis);
+            axis * ((coordinate * pixels).round() / pixels - coordinate)
+        };
+        position + correction(right) + correction(up)
+    }
+
     pub fn forward(self) -> Vec3 {
         self.rotation * Vec3::NEG_Z
     }
@@ -349,6 +387,36 @@ mod tests {
         let point = camera.view_projection(1.5).project_point3(Vec3::Y * 0.7);
         assert!(point.x.abs() < 1e-5 && point.y.abs() < 1e-5);
         assert!((0.0..1.0).contains(&point.z));
+    }
+
+    #[test]
+    fn pixel_camera_uses_integer_zoom_and_aligns_the_odd_framebuffer() {
+        let view = CameraView {
+            eye: Vec3::new(0.14, 0.28, 10.0),
+            rotation: Quat::from_rotation_z(0.3),
+            lens: CameraLens {
+                projection: Projection::Orthographic,
+                size: 2.2,
+                pixels_per_unit: Some(16),
+                ..CameraLens::default()
+            },
+        };
+        let size = [321, 183];
+        let aligned = view.pixel_aligned(size);
+        let matrix = aligned.view_projection(size[0] as f32 / size[1] as f32);
+        let screen = |point| {
+            let projected = matrix.project_point3(point);
+            glam::Vec2::new((projected.x + 1.0) * 160.5, (1.0 - projected.y) * 91.5)
+        };
+        let origin = screen(Vec3::ZERO);
+        assert!(origin.abs_diff_eq(origin.round(), 1e-4));
+        assert!((screen(view.right() / 16.0).x - origin.x - 3.0).abs() < 1e-4);
+        assert!((origin.y - screen(view.up() / 16.0).y - 3.0).abs() < 1e-4);
+        assert_eq!(aligned.eye.z, 10.0);
+        assert_eq!(
+            aligned.snap_to_pixel_grid(Vec3::new(0.001, 0.002, 3.0)).z,
+            3.0
+        );
     }
 
     #[test]

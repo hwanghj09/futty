@@ -95,6 +95,8 @@ pub(crate) struct Undo {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Batch {
     pub path: String,
+    /// Optional scene revision returned by scene_preview_ops. Reject if the scene file has changed.
+    expected_revision: Option<String>,
     edits: Vec<Operation>,
 }
 
@@ -213,6 +215,12 @@ enum Operation {
         /// Optional camera center bounds, as [minimum XY, maximum XY].
         bounds: Option<[[f32; 2]; 2]>,
     },
+    /// Enable integer zoom and a world-space pixel grid on an orthographic camera.
+    SetCameraPixelGrid {
+        object: String,
+        /// Sprite pixels per world unit, 1 to 1024. Omit or use null to disable.
+        pixels_per_unit: Option<u16>,
+    },
     SetScript {
         object: String,
         name: String,
@@ -318,6 +326,7 @@ impl Batch {
     pub fn place_prefab(input: crate::PlacePrefab) -> Self {
         Self {
             path: input.path,
+            expected_revision: None,
             edits: vec![Operation::PlacePrefab {
                 key: "instance".into(),
                 prefab_id: input.prefab_id,
@@ -329,6 +338,7 @@ impl Batch {
     pub fn attach_script(input: crate::scripts::AttachScript) -> Self {
         Self {
             path: input.path,
+            expected_revision: None,
             edits: vec![Operation::AttachScript {
                 object: input.object_id.to_string(),
                 script_id: input.script_id,
@@ -336,17 +346,56 @@ impl Batch {
         }
     }
 
-    pub fn apply(self, scene: &mut Scene) -> Result<BTreeMap<String, Uuid>, ErrorData> {
+    pub fn read(&self, path: &std::path::Path) -> Result<(Scene, String), ErrorData> {
+        let original = std::fs::read_to_string(path).map_err(crate::io_error)?;
+        let mut fingerprint = crate::replay::Fingerprint::new();
+        fingerprint.add(original.as_bytes());
+        let revision = fingerprint.finish();
+        if let Some(expected) = &self.expected_revision
+            && *expected != revision
+        {
+            return Err(ErrorData::invalid_params(
+                "Scene changed since the requested revision",
+                Some(json!({"expected_revision":expected,"current_revision":revision})),
+            ));
+        }
+        Ok((Scene::decode(&original).map_err(crate::io_error)?, revision))
+    }
+
+    pub fn prepare(self, before: &Scene) -> Result<(Scene, BTreeMap<String, Uuid>), ErrorData> {
         if !(1..=64).contains(&self.edits.len()) {
             return Err(invalid("Provide between 1 and 64 scene edits"));
         }
+        let mut scene = before.clone();
         let mut keys = BTreeMap::new();
         for (index, edit) in self.edits.into_iter().enumerate() {
-            apply_edit(edit, scene, &mut keys)
-                .map_err(|error| invalid(format!("Edit {}: {}", index + 1, error.message)))?;
+            apply_edit(edit, &mut scene, &mut keys).map_err(|error| {
+                let message = format!("Edit {}: {}", index + 1, error.message);
+                ErrorData::invalid_params(
+                    message.clone(),
+                    Some(json!({
+                        "issue":{"edit":index + 1,"message":message},
+                    })),
+                )
+            })?;
         }
-        Ok(keys)
+        scene.sync_prefabs(before).map_err(batch_issue)?;
+        scene.validate().map_err(batch_issue)?;
+        let ids: std::collections::HashSet<_> =
+            scene.entities.iter().map(|object| object.uuid).collect();
+        keys.retain(|_, id| ids.contains(id));
+        Ok((scene, keys))
     }
+}
+
+fn batch_issue(error: Box<dyn std::error::Error>) -> ErrorData {
+    let issue = error
+        .downcast_ref::<futty_runtime::SceneIssue>()
+        .map_or_else(
+            || json!({"message":error.to_string()}),
+            |issue| json!(issue),
+        );
+    ErrorData::invalid_params(error.to_string(), Some(json!({"issue":issue})))
 }
 
 fn apply_edit(
@@ -587,6 +636,28 @@ fn apply_edit(
                 axes: axes.unwrap_or([true; 2]),
                 bounds,
             });
+        }
+        Operation::SetCameraPixelGrid {
+            object,
+            pixels_per_unit,
+        } => {
+            let index = object_index(&object, scene, keys)?;
+            let object = &mut scene.entities[index];
+            if object.prefab.is_some() {
+                return Err(invalid("Edit the prefab source to change the camera"));
+            }
+            let lens = object
+                .camera
+                .as_mut()
+                .ok_or_else(|| invalid("Choose a camera object"))?;
+            if pixels_per_unit.is_some() && lens.projection != futty_core::Projection::Orthographic
+            {
+                return Err(invalid("Pixel grid requires an orthographic camera"));
+            }
+            if pixels_per_unit.is_some_and(|pixels| !(1..=1024).contains(&pixels)) {
+                return Err(invalid("Pixels per unit must be between 1 and 1024"));
+            }
+            lens.pixels_per_unit = pixels_per_unit;
         }
         Operation::SetScript {
             object,

@@ -20,6 +20,9 @@ impl SceneFrame {
         RenderScene {
             view_projection: self.view.view_projection(aspect),
             camera_position: self.view.eye,
+            pixel_view: (self.view.lens.projection == Projection::Orthographic
+                && self.view.lens.pixels_per_unit.is_some())
+            .then_some(self.view),
             sky_clip_to_world: sky.then(|| {
                 let lens = match self.view.lens.projection {
                     Projection::Perspective => self.view.lens,
@@ -49,7 +52,7 @@ pub fn draw_objects(
     selected: &[Uuid],
     preview: Option<&HashMap<Uuid, Transform>>,
 ) -> SceneFrame {
-    let (state, animations, sprite_times, inactive, spawned) = runtime.map_or_else(
+    let (state, animations, sprite_playback, inactive, spawned) = runtime.map_or_else(
         || {
             (
                 HashMap::new(),
@@ -65,11 +68,11 @@ pub fn draw_objects(
                 .map(|(id, transform, color)| (id, (transform, color)))
                 .collect();
             let animations = runtime.animated_objects().collect::<HashMap<_, _>>();
-            let sprite_times = runtime.animated_sprites().collect::<HashMap<_, _>>();
+            let sprite_playback = runtime.animated_sprites().collect::<HashMap<_, _>>();
             (
                 state,
                 animations,
-                sprite_times,
+                sprite_playback,
                 runtime.inactive_objects().clone(),
                 runtime.spawned_objects(),
             )
@@ -135,9 +138,11 @@ pub fn draw_objects(
                 surface: material.map_or_else(Default::default, |material| material.surface),
                 material_override: material.is_some(),
                 sprite: object.sprite.map(|sprite| {
-                    let mut uv = sprite.sheet.map_or([0.0, 0.0, 1.0, 1.0], |sheet| {
-                        sheet.uv_rect(sprite_times.get(&object.uuid).copied().unwrap_or(0.0))
-                    });
+                    let mut uv = sprite_playback
+                        .get(&object.uuid)
+                        .copied()
+                        .or_else(|| sprite.sheet.map(|sheet| (sheet, 0.0)))
+                        .map_or([0.0, 0.0, 1.0, 1.0], |(sheet, time)| sheet.uv_rect(time));
                     if let Some(planar) = sprite.planar {
                         for (extent, flip) in uv[2..].iter_mut().zip(planar.flip) {
                             if flip {
@@ -150,7 +155,7 @@ pub fn draw_objects(
                 sprite_layer: object
                     .sprite
                     .and_then(|sprite| sprite.planar)
-                    .map_or(0, |planar| planar.layer),
+                    .map(|planar| planar.layer),
                 animation: animations
                     .get(&object.uuid)
                     .copied()
@@ -201,7 +206,7 @@ mod tests {
     use futty_runtime::Object;
 
     #[test]
-    fn orthographic_frame_follows_script_movement_and_advances_sprite_cells() {
+    fn orthographic_frame_uses_scripted_motion_and_sprite_clip() {
         let mut scene = Scene::default();
         let actor = &mut scene.entities[0];
         let texture = Uuid::new_v4();
@@ -221,7 +226,7 @@ mod tests {
                 columns: 2,
                 rows: 1,
                 first_frame: 0,
-                frames: 2,
+                frames: 1,
                 fps: 10.0,
                 looping: true,
             }),
@@ -240,7 +245,7 @@ mod tests {
         ]);
         scene.script_sources.insert(
             script,
-            "fn on_start(entity) { set_position(entity, 6.0, 7.0, 0.0); }".into(),
+            "fn on_start(entity) { set_position(entity, 6.0, 7.0, 0.0); play_sprite(entity, 1, 1, 10, false); }".into(),
         );
         let camera_index = scene.entities.len();
         let mut camera = Object::cube("View".into(), Vec3::new(0.0, 2.0, 10.0));
@@ -272,7 +277,7 @@ mod tests {
         };
         let saved = frame(None);
         assert_eq!(saved.instances[0].sprite, Some([0.0, 0.0, -0.5, 1.0]));
-        assert_eq!(saved.instances[0].sprite_layer, 3);
+        assert_eq!(saved.instances[0].sprite_layer, Some(3));
         assert_eq!(
             saved.instances[0].matrix.w_axis.truncate(),
             scene.entities[0].transform.translation + Vec3::new(0.5, -0.5, 0.0)

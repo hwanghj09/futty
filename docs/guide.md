@@ -166,6 +166,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Cli
 
 연결을 시험하려면 **“Futty MCP로 `examples/agent-escape/Beacon Bot Escape.futty.scene.ron` 씬을 조회해줘”**라고 요청합니다.
 
+### 씬 편집 미리보기와 비교
+
+저장하기 전에 `scene_apply`와 같은 `path`·`edits`를 `scene_preview_ops`에 전달합니다. 올바른 배치에는 `revision`과 `changes`가 반환됩니다. 올바르지 않은 배치는 `valid: false`와 검사 오류를 반환합니다. 편집 작업의 오류에는 1부터 시작하는 `edit` 번호가 포함됩니다.
+
+```json
+{
+  "path":"Main.futty.scene.ron",
+  "edits":[{"op":"add_object","key":"marker","name":"Start Marker"}]
+}
+```
+
+확인한 배치를 적용할 때는 같은 요청에 `"expected_revision":"<미리보기의 revision>"`을 추가해 `scene_apply`를 호출합니다. 씬 파일 내용이 달라졌으면 새 미리보기를 만들어 적용해야 합니다. `preview_objects`의 UUID는 미리보기 안에서만 쓰며, 확정 UUID는 적용 응답의 `objects`에서 확인합니다.
+
+저장된 파일 두 개는 `scene_diff`에 `{"before_path":"Before.ron","after_path":"After.ron"}`을 넘겨 비교합니다. 두 도구는 UUID를 기준으로 오브젝트·에셋·HUD·재질·프리팹·내장 스크립트 차이를 분류하고, 각 종류의 추가·삭제·수정 개수와 최대 64개 항목의 세부 정보를 반환합니다. 바뀐 오브젝트 속성에는 이전 값과 새 값이 표시됩니다. 둘 다 씬 파일이나 Undo 기록을 쓰지 않습니다.
+
 ## MCP 에셋과 재질
 
 | 도구 | 사용 방법 |
@@ -401,7 +416,7 @@ HUD 배치는 씬 파일에 저장되며 Play와 Windows 내보내기에도 적�
 
 에디터에서 **File → New 2D Scene**을 선택하거나, MCP의 `scene_create`에 `{"path":"Main.futty.scene.ron","name":"Main","dimension":"TwoD"}`를 전달합니다. XY 평면을 바라보는 직교 카메라와 단색 배경으로 시작합니다. 기존 씬과 차원을 생략한 새 씬은 `ThreeD`로 열립니다. `scene_inspect`의 `dimension`으로 저장한 설정을 확인할 수 있습니다.
 
-`TwoD` 씬은 Rapier2D로 XY 평면의 충돌을 계산합니다. 오브젝트의 Z는 화면 깊이로 유지되며, Z가 서로 달라도 XY에서 겹치면 충돌합니다. 강체는 박스 형태이고, 캐릭터 컨트롤러는 캡슐을 사용합니다. 기존 `ThreeD` 씬은 Rapier3D를 사용합니다.
+`TwoD` 씬은 Rapier2D로 XY 평면의 충돌을 계산합니다. 오브젝트의 Z는 화면 깊이로 유지되며, Z가 서로 달라도 XY에서 겹치면 충돌합니다. 2D 강체는 박스·원·캡슐을 지원하고, 캐릭터 컨트롤러는 캡슐을 사용합니다. 기존 `ThreeD` 씬은 Rapier3D를 사용합니다.
 
 #### Sprite2D와 직교 카메라 캡처
 
@@ -446,7 +461,33 @@ MCP에서는 스프라이트와 직교 카메라를 만든 뒤 `scene_apply`에 
 
 `sheet: null`은 전체 PNG를 표시하고, `tag: null`은 카메라 추적을 끕니다. `scene_capture`에는 설정한 시작 칸이 표시됩니다.
 
+#### 상태에 따른 스프라이트 애니메이션
+
+스프라이트 시트를 설정한 뒤 해당 오브젝트의 Rhai에서 `play_sprite(entity, first_frame, frames, fps, looping)`을 호출해 재생 구간을 전환합니다.
+
+```rhai
+fn on_update(entity, dt) {
+    if input_down("MoveLeft") || input_down("MoveRight") {
+        play_sprite(entity, 0, 4, 8, true);
+    } else {
+        play_sprite(entity, 0, 1, 8, false);
+    }
+}
+```
+
+같은 구간을 반복 요청하면 재생 위치를 유지하고, 구간이나 속도·반복 설정이 바뀌면 첫 칸부터 재생합니다. 반복을 끄면 마지막 칸을 유지합니다. 범위는 등록한 시트 안에 있어야 하며 속도는 1~60 fps입니다. 재생 상태는 Play 세션에 적용되며, MCP 관찰의 `visible_objects[].sprite_frame`에서 현재 칸 번호를 확인할 수 있습니다. Coin Runner 템플릿에서 대기와 이동 전환을 확인할 수 있습니다.
+
 카메라가 레벨 끝에서 멈추게 하려면 `set_camera_follow`에 `"bounds":[[2,0],[18,8]]`처럼 카메라 중심의 최소·최대 XY 좌표를 추가합니다. 오프셋을 더한 뒤 추적 중인 축에만 적용됩니다. 화면 가장자리까지 맵을 채우려면 직교 카메라의 화면 반높이와 종횡비를 고려해 중심의 이동 범위를 정하세요.
+
+#### 픽셀 퍼펙트 카메라
+
+직교 카메라의 **Inspector → Camera → Pixel perfect**를 켜고 **Pixels per unit**을 설정합니다. MCP에서는 같은 설정을 `scene_apply`로 적용합니다.
+
+```json
+{"op":"set_camera_pixel_grid","object":"view","pixels_per_unit":32}
+```
+
+게임 화면과 `scene_capture`는 실제 출력 픽셀 크기에 맞춰 정수 배율을 선택합니다. 카메라와 Sprite2D의 표시 위치를 격자에 맞추고, Sprite2D 텍스처는 최근접 방식으로 그립니다. 32 px 너비의 스프라이트를 월드 1 단위로 배치할 때는 32를 지정합니다. 적용 중 확대 배율은 최소 1배이며, 창 크기가 변하면 표시 영역이 계단식으로 바뀔 수 있습니다. MCP에서는 `pixels_per_unit: null`로 끕니다.
 
 #### 타일맵과 플랫폼 점프
 
@@ -514,13 +555,43 @@ P1은 **Game Controls**의 키 설정을 사용합니다. 같은 키가 두 플�
 ## 물리
 
 1. **File → Physics Playground**를 선택하고 **Play**를 누릅니다. 큐브가 떨어져 바닥과 경사로에 부딪힙니다. 탭 우클릭 **→ Panels → Physics**에서 충돌과 트리거 이벤트를 확인할 수 있습니다.
-2. 직접 구성할 때는 씬 루트에서 오브젝트를 선택하고 **Inspector → Physics → Rigid body**를 켭니다. 떨어지는 큐브에는 **Dynamic**, 바닥에는 **Fixed**를 지정합니다. **Kinematic**의 **Rotate in Play**는 회전하는 플랫폼처럼 다른 강체와 충돌하는 물체를 만듭니다.
+2. 직접 구성할 때는 씬 루트에서 오브젝트를 선택하고 **Inspector → Physics → Rigid body**를 켭니다. 떨어지는 큐브에는 **Dynamic**, 바닥에는 **Fixed**를 지정합니다.
 3. **Fit to mesh**로 상자 충돌체를 모델에 맞추거나 **Local size / Local center**를 조절합니다. **Trigger sensor**는 물체의 통과를 허용하면서 진입·이탈을 기록합니다.
 
-물리는 Play 중 60 Hz로 실행됩니다. **Stop**을 누르면 편집 씬의 위치와 회전으로 돌아갑니다. 현재 충돌체는 씬 루트에 있는 오브젝트의 상자 형태를 지원합니다.
+물리는 Play 중 60 Hz로 실행됩니다. **Stop**을 누르면 편집 씬의 위치와 회전으로 돌아갑니다.
 
 - 씬 루트의 카메라나 오브젝트에 **Physics → Character controller**를 켜면 캡슐로 벽과 바닥에 충돌하며 이동합니다. **WASD**로 이동하고 **Space**로 점프합니다. `Origin above feet`는 바닥에서 오브젝트 원점까지의 높이입니다. 같은 오브젝트에는 강체와 캐릭터 컨트롤러 중 하나를 사용합니다.
 - 강체의 **Collision layer**는 1–32이며 **Collision mask**의 최하위 비트가 레이어 1입니다. `FFFFFFFF`는 모든 레이어를 선택합니다. 캐릭터는 마스크에 포함된 고체 충돌체를 통과할 수 없습니다. Pulse Range의 발사는 가장 가까운 고체에서 막힙니다.
+
+### 2D 강체 충돌체 모양
+
+2D 씬에서 오브젝트의 **Inspector → Physics → Rigid body**를 켜고 **Box**, **Circle**, **Capsule** 중 하나를 선택합니다. 씬 뷰에서 해당 오브젝트를 선택하면 실제 충돌 윤곽을 확인할 수 있습니다. 모양은 센서와 레이캐스트에도 적용됩니다.
+
+```json
+{"op":"set_component","object":"pickup","component":{"kind":"body","motion":"Fixed","shape":"capsule","size":[1,2,1],"sensor":true}}
+```
+
+원의 지름은 `size.x`와 오브젝트의 X 스케일로 정합니다. 캡슐은 로컬 Y축을 따라 서고, 스케일을 적용한 폭과 전체 높이 중 작은 값이 지름이 됩니다. 기존 파일과 `shape`를 생략한 새 강체는 박스로 저장·로드됩니다.
+
+### 2D 이동 발판
+
+1. 2D 씬의 발판에 **Kinematic** 강체를 추가하고 **Trigger sensor**와 **Rotate in Play**를 끕니다.
+2. 발판 스크립트의 `on_fixed_update(entity, dt)`에서 `set_position`으로 발판의 X·Y 좌표를 이동시킵니다.
+3. **Side-scroller** 캐릭터의 충돌 마스크에 발판 레이어를 포함합니다. 발판 위에서 쉴 때나 걸을 때는 발판의 위치 이동을 따라가며, 점프하거나 가장자리로 걸어 나가면 발판에서 벗어납니다.
+
+[Moving Platform Lab](../examples/moving-platform/Moving%20Platform%20Lab.futty.project.ron)을 **Project → Open Project**에서 열고 **Play**를 누릅니다. 파란 발판이 초록 착지대에 가까워질 때까지 기다렸다가 **D + Space**로 건너갑니다.
+
+MCP의 `play_test`로 같은 경로를 검증할 수 있습니다.
+
+```json
+{
+  "path": "examples/moving-platform/Moving Platform Lab.futty.scene.ron",
+  "steps": [{"ticks": 106}, {"actions": ["right", "jump"], "ticks": 36}, {"ticks": 38}],
+  "expect": "success"
+}
+```
+
+첫 스텝부터 `right`를 86틱 누르면 추락하며 `expect: "failure"`로 검증할 수 있습니다.
 
 ## Rhai 스크립트
 

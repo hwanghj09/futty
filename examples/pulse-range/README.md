@@ -13,6 +13,8 @@ cargo run --locked -p futty-editor -- --play "examples/pulse-range/Pulse Range.f
 
 로비부터 시작하려면 **File → Project → Open Project…**에서 `Pulse Range.futty.project.ron`을 엽니다. **Play**를 누른 뒤 **Enter practice range**를 클릭하면 연습장으로 전환됩니다. **Export Windows Project…**는 두 씬을 함께 패키징합니다.
 
+로비는 게임 이름, 라운드 조건, 입장 버튼 순으로 배치한 [Futty 게임 UI 디자인](../../.agents/skills/futty-game-ui/SKILL.md) 적용 예제입니다.
+
 | 조작 | 키 |
 | --- | --- |
 | 시작 또는 이어 하기 | 게임 화면 클릭 |

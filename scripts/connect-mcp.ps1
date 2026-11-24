@@ -2,26 +2,48 @@ param(
     [string] $WslBinary,
     [string] $Distribution,
     [ValidateSet('Codex', 'ClaudeCode', 'ClaudeDesktop')]
-    [string] $Client = 'Codex'
+    [string] $Client = 'Codex',
+    [string] $BundledEditor,
+    [string] $Workspace,
+    [string] $SkillsSource,
+    [string] $SkillsZipDirectory
 )
 
 $ErrorActionPreference = 'Stop'
-$workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-
-if ($Client -ne 'ClaudeDesktop') {
-    $cli = if ($Client -eq 'ClaudeCode') { 'claude' } else { 'codex' }
-    if (-not (Get-Command $cli -ErrorAction SilentlyContinue)) {
-        throw "The $cli CLI is required. Install it and make sure it is on PATH."
-    }
+$workspace = if ($BundledEditor) {
+    (Resolve-Path -LiteralPath $Workspace).Path
 } else {
+    (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+}
+
+$cliArgs = @()
+if ($Client -eq 'Codex' -or ($Client -eq 'ClaudeCode' -and !$BundledEditor)) {
+    $cli = if ($Client -eq 'ClaudeCode') { 'claude' } else { 'codex' }
+    if ($BundledEditor) {
+        $cli = (Get-Command codex.exe -CommandType Application -ErrorAction SilentlyContinue).Source
+        if (!$cli) {
+            $launcher = (Get-Command codex.cmd -CommandType Application -ErrorAction SilentlyContinue).Source
+            $node = (Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue).Source
+            if ($launcher -and $node) {
+                $entryPoint = Join-Path (Split-Path -Parent $launcher) 'node_modules\@openai\codex\bin\codex.js'
+                if (Test-Path -LiteralPath $entryPoint -PathType Leaf) {
+                    $cli = $node
+                    $cliArgs = @($entryPoint)
+                }
+            }
+        }
+    }
+    if (!$cli -or -not (Get-Command $cli -ErrorAction SilentlyContinue)) {
+        throw "The $Client CLI is required. Install it and make sure it is on PATH."
+    }
+} elseif ($Client -eq 'ClaudeDesktop') {
     $configFolder = Join-Path $env:APPDATA 'Claude'
     if (-not (Test-Path -LiteralPath $configFolder -PathType Container)) {
         throw 'Open Claude Desktop once before registering a local MCP server.'
     }
 }
 
-function Set-ClaudeDesktopMcp([string] $Executable, [string[]] $Arguments) {
-    $configPath = Join-Path $configFolder 'claude_desktop_config.json'
+function Set-JsonMcp([string] $ConfigPath, [string] $Executable, [string[]] $Arguments) {
     $exists = Test-Path -LiteralPath $configPath
     $config = if ($exists) {
         Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -38,16 +60,32 @@ function Set-ClaudeDesktopMcp([string] $Executable, [string[]] $Arguments) {
         throw 'Claude Desktop mcpServers must be a JSON object.'
     }
     $entry = $config.mcpServers.PSObject.Properties['futty']
-    if ($entry -and $entry.Value -is [pscustomobject]) {
-        $entry.Value | Add-Member -NotePropertyName command -NotePropertyValue $Executable -Force
-        $entry.Value | Add-Member -NotePropertyName args -NotePropertyValue $Arguments -Force
+    $settings = if ($entry -and $entry.Value -is [pscustomobject]) {
+        $entry.Value
     } else {
-        $config.mcpServers | Add-Member -NotePropertyName futty -NotePropertyValue @{
-            command = $Executable
-            args = $Arguments
-        } -Force
+        [pscustomobject]@{}
     }
-    $temporary = Join-Path $configFolder ([guid]::NewGuid().ToString() + '.tmp')
+    $sameRegistration = $settings.command -is [string] -and $settings.command -ceq $Executable -and
+        $settings.args -is [array] -and $settings.args.Count -eq $Arguments.Count -and
+        (($Client -ne 'ClaudeCode' -and !$settings.PSObject.Properties['type']) -or $settings.type -eq 'stdio')
+    if ($sameRegistration) {
+        for ($i = 0; $i -lt $Arguments.Count; $i++) {
+            if ($settings.args[$i] -cne $Arguments[$i]) {
+                $sameRegistration = $false
+                break
+            }
+        }
+        if ($sameRegistration) { return }
+    }
+    if ($Client -eq 'ClaudeCode' -or $settings.PSObject.Properties['type']) {
+        $settings | Add-Member -NotePropertyName type -NotePropertyValue 'stdio' -Force
+        $settings.PSObject.Properties.Remove('url')
+        $settings.PSObject.Properties.Remove('headers')
+    }
+    $settings | Add-Member -NotePropertyName command -NotePropertyValue $Executable -Force
+    $settings | Add-Member -NotePropertyName args -NotePropertyValue $Arguments -Force
+    $config.mcpServers | Add-Member -NotePropertyName futty -NotePropertyValue $settings -Force
+    $temporary = Join-Path (Split-Path -Parent $configPath) ([guid]::NewGuid().ToString() + '.tmp')
     try {
         $json = $config | ConvertTo-Json -Depth 100
         [IO.File]::WriteAllText($temporary, $json, [Text.UTF8Encoding]::new($false))
@@ -59,12 +97,15 @@ function Set-ClaudeDesktopMcp([string] $Executable, [string[]] $Arguments) {
     } finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary }
     }
-    Write-Host "Registered futty in $configPath. Fully quit and reopen Claude Desktop to load it."
+    Write-Host "Registered futty in $configPath."
 }
 
 Push-Location -LiteralPath $workspace
 try {
-    if ($WslBinary) {
+    if ($BundledEditor) {
+        $executable = (Resolve-Path -LiteralPath $BundledEditor).Path
+        $serverArgs = @('--mcp', $workspace)
+    } elseif ($WslBinary) {
         $binary = (Resolve-Path -LiteralPath $WslBinary).Path
         $wsl = (Get-Command wsl.exe).Source
         $wslArgs = @()
@@ -94,15 +135,34 @@ try {
         $serverArgs = @($workspace)
     }
     if ($Client -eq 'ClaudeDesktop') {
-        Set-ClaudeDesktopMcp $executable $serverArgs
+        Set-JsonMcp (Join-Path $configFolder 'claude_desktop_config.json') $executable $serverArgs
+        if ($SkillsSource -and $SkillsZipDirectory) {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            foreach ($skill in Get-ChildItem -LiteralPath $SkillsSource -Directory) {
+                $zip = Join-Path $SkillsZipDirectory ($skill.Name + '.zip')
+                if (Test-Path -LiteralPath $zip) { continue }
+                $temporary = Join-Path $SkillsZipDirectory ([guid]::NewGuid().ToString() + '.zip')
+                try {
+                    [IO.Compression.ZipFile]::CreateFromDirectory(
+                        $skill.FullName, $temporary, [IO.Compression.CompressionLevel]::Optimal, $true
+                    )
+                    [IO.File]::Move($temporary, $zip)
+                } finally {
+                    if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary }
+                }
+            }
+        }
+        Write-Host 'Fully quit and reopen Claude Desktop to load it.'
+    } elseif ($BundledEditor -and $Client -eq 'ClaudeCode') {
+        Set-JsonMcp (Join-Path $workspace '.mcp.json') $executable $serverArgs
     } else {
         if ($Client -eq 'ClaudeCode') {
             & $cli mcp add --scope local --transport stdio futty -- $executable @serverArgs
         } else {
-            & $cli mcp add futty -- $executable @serverArgs
+            & $cli @cliArgs mcp add futty -- $executable @serverArgs
         }
         if ($LASTEXITCODE -ne 0) { throw "$Client MCP registration failed." }
-        & $cli mcp get futty
+        & $cli @cliArgs mcp get futty
         if ($LASTEXITCODE -ne 0) { throw 'Could not verify the Futty MCP registration.' }
     }
 } finally {

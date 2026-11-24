@@ -19,9 +19,9 @@ use uuid::Uuid;
 
 use crate::{
     audio, hud_view,
-    input::InputSettings,
+    input::{InputSettings, MouseMode},
     project::{self, Project, SceneList},
-    range_view::RangeControls,
+    range_view::ViewportControls,
     viewport::Viewport,
 };
 
@@ -29,7 +29,7 @@ pub(crate) struct Player {
     world: GameScene,
     project: Option<(PathBuf, SceneList)>,
     scene_error: Option<String>,
-    range_controls: RangeControls,
+    range_controls: ViewportControls,
     input_settings: InputSettings,
     controls_open: bool,
 }
@@ -108,7 +108,7 @@ impl Player {
             world,
             project,
             scene_error: None,
-            range_controls: RangeControls::default(),
+            range_controls: ViewportControls::default(),
             input_settings: InputSettings::load(cc.storage),
             controls_open: false,
         })
@@ -206,7 +206,7 @@ impl GameScene {
         &mut self,
         ui: &mut egui::Ui,
         response: &egui::Response,
-        controls: &mut RangeControls,
+        controls: &mut ViewportControls,
         settings: &InputSettings,
         interactive: bool,
     ) {
@@ -224,11 +224,11 @@ impl GameScene {
             &[],
             None,
         );
-        self.viewport.render(
+        self.viewport.render_game(
             ui,
             rect,
             frame.render_scene(rect.aspect_ratio(), self.scene.sky),
-            true,
+            interactive,
         );
         hud_view::paint(
             ui,
@@ -239,8 +239,8 @@ impl GameScene {
             Some(&mut self.runtime),
             interactive && controls.cursor_free(),
         );
+        let capture = interactive && !hud_view::over_button(ui.ctx(), rect, &self.scene.hud);
         if let Some(status) = self.runtime.range_status() {
-            let capture = interactive && !hud_view::over_button(ui.ctx(), rect, &self.scene.hud);
             controls.paint(
                 ui,
                 response,
@@ -249,6 +249,8 @@ impl GameScene {
                 self.scene.hud.is_empty(),
                 capture,
             );
+        } else if self.scene.input.capture_mouse {
+            controls.paint_first_person(ui, response, capture);
         }
     }
 }
@@ -269,13 +271,14 @@ impl eframe::App for Player {
                 let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
                 if ctx.current_pass_index() == 0 {
                     let is_range = self.world.runtime.range_status().is_some();
+                    let mode = MouseMode::for_scene(&self.world.scene, is_range);
                     let game = (!self.controls_open).then_some(rect);
                     let hud_blocks_mouse = self.range_controls.cursor_free()
                         && hud_view::over_button(&ctx, rect, &self.world.scene.hud);
                     let (dt, keys, second) = self.range_controls.input(
                         &ctx,
                         game,
-                        is_range,
+                        mode,
                         &self.input_settings.with_profile(&self.world.scene.input),
                         hud_blocks_mouse,
                         self.world.scene.local_player_two().is_some(),
@@ -286,9 +289,17 @@ impl eframe::App for Player {
                         .camera_index(None)
                         .filter(|_| !is_range)
                         .map(|index| self.world.scene.entities[index].uuid);
-                    InputSettings::aim_character(&ctx, &mut self.world.runtime, player, &keys);
-                    self.world.runtime.local_game_input(keys, second);
-                    self.world.runtime.tick(dt);
+                    if dt > 0.0 {
+                        InputSettings::aim_character(
+                            &ctx,
+                            &mut self.world.runtime,
+                            player,
+                            &keys,
+                            mode,
+                        );
+                        self.world.runtime.local_game_input(keys, second);
+                        self.world.runtime.tick(dt);
+                    }
                     if let Some(id) = self.world.runtime.take_scene_request() {
                         self.transition(&ctx, &id);
                     }
@@ -472,6 +483,21 @@ mod tests {
                     .all(|object| object.material_override && object.surface.roughness == 0.1)
             );
         }
+        runtime
+            .set_play_tint(scene.entities[0].uuid, [0.5, 0.0, 1.0])
+            .unwrap();
+        let frame = draw_objects(
+            &scene,
+            &hierarchy,
+            Some(&mut runtime),
+            Camera::default(),
+            None,
+            &[],
+            None,
+        );
+        assert_eq!(frame.instances[0].color, [0.4, 0.0, 0.2]);
+        assert_eq!(frame.instances[1].color, [0.4, 0.2, 0.1]);
+        assert_eq!(scene.entities[0].color, [1.0; 3]);
     }
 
     #[test]

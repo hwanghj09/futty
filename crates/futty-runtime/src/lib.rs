@@ -26,7 +26,7 @@ mod range;
 mod script;
 mod sprite;
 pub use audio::{AudioCue, AudioListener, AudioSource, AudioStart};
-pub use character::{CharacterController, CharacterMode};
+pub use character::{CharacterController, CharacterFeel, CharacterMode};
 pub use health::{Health, HealthState};
 pub use hud::{HudAnchor, HudKind, HudWidget, MAX_HUD_WIDGETS, range_hud_value};
 pub use input::InputProfile;
@@ -1361,6 +1361,31 @@ impl Runtime {
 
     pub fn is_active(&self, id: Uuid) -> bool {
         !self.inactive.borrow().contains(&id)
+    }
+
+    pub fn validate_play_tint(&self, id: Uuid, color: [f32; 3]) -> Result<(), &'static str> {
+        if !color
+            .into_iter()
+            .all(|channel| (0.0..=1.0).contains(&channel))
+        {
+            return Err("Tint channels must be between 0 and 1");
+        }
+        if !self.index.by_uuid.contains_key(&id) || !self.is_active(id) {
+            return Err("Tint target is missing or inactive in Play");
+        }
+        Ok(())
+    }
+
+    /// Apply a visual-only edit between simulation ticks without rebuilding the world.
+    pub fn set_play_tint(&mut self, id: Uuid, color: [f32; 3]) -> Result<(), &'static str> {
+        self.validate_play_tint(id, color)?;
+        let entity = self.index.by_uuid[&id];
+        let mut object = self
+            .world
+            .get_mut::<RuntimeObject>(entity)
+            .ok_or("Tint target is missing in Play")?;
+        object.color = color;
+        Ok(())
     }
 
     pub fn health_state(&self, id: Uuid) -> Option<HealthState> {

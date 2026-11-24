@@ -75,7 +75,7 @@
 | 빌드 | 준비된 Windows x64 실행 파일 기반 Game.exe 패키징 | 전용 서버 빌드, 2D·멀티 통합 릴리스 파이프라인 |
 | 프로토타입 에셋 | [Python 생성기](../scripts/generate-prototype-assets.py)의 PNG 4개, Idle/Action GLB 1개, WAV 3개를 Futty에서 임포트·검증 | 전체 게임 자동 연계 및 고품질 제작 |
 
-**근거**: [MCP 실제 구현](../crates/futty-mcp/src/main.rs), [런타임](../crates/futty-runtime/src/lib.rs), [에셋 로더](../crates/futty-assets/src/lib.rs), [빌더](../crates/futty-build/src/lib.rs), [CI](../.github/workflows/ci.yml). 실제 배포·테스트 품질은 소스 존재만으로 보증되지 않는다.
+**근거**: [MCP 실제 구현](../crates/futty-mcp/src/lib.rs), [런타임](../crates/futty-runtime/src/lib.rs), [에셋 로더](../crates/futty-assets/src/lib.rs), [빌더](../crates/futty-build/src/lib.rs), [CI](../.github/workflows/ci.yml). 실제 배포·테스트 품질은 소스 존재만으로 보증되지 않는다.
 
 기존 로드맵에 있던 “MCP 도구 5개” 또는 “에셋·스크립트 API 미구현”과 같은 초창기 서술은 **현재 코드 상태와 맞지 않으므로 폐기**한다. API가 구현되었는지 확인할 때는 언제나 실제 MCP 도구 목록과 테스트를 우선한다.
 
@@ -288,7 +288,7 @@ Planned → Generated → Validated → Imported → Bound → Tested → Final
 - AI가 문제를 제안할 때는 "발견 내용 → 근거(틱/객체/리플레이) → 변경안 → 재테스트 결과"를 제시한다.
 - 기존 기반: 현재 MCP의 **play_start, play_observe, play_step, play_test, play_replay**, 고정 틱·리플레이·실패 보고 기능을 활용할 수 있다. **다중 Persona 자동 실행·결과 분석 서비스는 신규**다.
 
-**제안 API**: ghost_profile_create, ghost_run, ghost_batch_run, ghost_report, ghost_replay.
+**구현된 API**는 `ghost_batch_run`과 재현용 `play_replay`다. 배치 실행은 태그 기반 세 가지 규칙 정책과 시드를 조합해 성공 횟수, 종료·정체 틱, 위치, HUD, 리플레이를 기록한다. [Futty Ghost 사용법](guide.md#futty-ghost-자동-플레이테스트)
 
 **첫 수락 시험**: 단순 코인 게임에서 초보자/탐험가/목표형 정책을 최소 3개 시드로 실행하고, 성공/막힘의 원인과 첫 실패 틱을 재현 가능한 보고서로 출력한다.
 
@@ -307,6 +307,8 @@ Planned → Generated → Validated → Imported → Bound → Tested → Final
 
 **제안 API**: feel_list_parameters, feel_get, feel_preview, feel_apply, feel_compare, feel_save_preset, feel_restore.
 
+**1차 구현**은 이동 속도와 점프 속도를 지원한다. 에디터의 **Window → Futty Feel**에서 프리셋이나 숫자로 초안을 만든 뒤 Play에서 시험하고, 적용과 저장을 따로 수행한다. MCP의 `feel_get`, `feel_preview`, `feel_apply`도 같은 범위와 유효성 검사를 사용하며 저장된 씬의 리비전을 확인한다. 실행 중 값 변경과 리플레이 기반 A/B 비교는 후속 범위다. [Futty Feel 사용법](guide.md#futty-feel-캐릭터-조절)
+
 **첫 수락 시험**: 동일한 캐릭터의 속도/점프를 에디터 슬라이더와 MCP에서 각각 변경하여 동일한 저장 데이터·플레이 결과를 얻는다. 실시간 미리보기 취소 후 원래 값이 복원되고 사용자 수동 조정이 AI에 의해 덮어써지지 않아야 한다.
 
 #### 7-C. Futty Live Surgery — 게임의 일부만 안전하게 수정·교체
@@ -323,6 +325,10 @@ Planned → Generated → Validated → Imported → Bound → Tested → Final
 - 기존 기반: **scene_apply·scene_undo·asset_reimport·에셋 UUID·scene_capture**를 활용하되, **의존성 추적·복수 파일 트랜잭션·Play 중 Hot Reload**는 신규다.
 
 **제안 API**: surgery_inspect_impact, surgery_preview, surgery_apply, surgery_rollback, surgery_hot_reload.
+
+**1차 구현**은 저장된 씬의 오브젝트 하나를 대상으로 한다. `surgery_preview`는 색상과 교체용 Rhai의 변경 내용, 영향받는 UUID, 기존 스크립트를 공유하는 오브젝트 수를 보여 준다. `surgery_apply`는 같은 MCP 세션의 최신 미리보기를 리비전 검사 후 원자적으로 저장한다. `surgery_rollback`으로 변경을 되돌릴 수 있다.
+
+**개발용 Hot Reload**는 오브젝트 색상부터 지원한다. 에디터의 Play에서는 선택한 오브젝트의 저장된 색상을 읽을 수 있다. MCP의 `surgery_hot_reload`는 실행 중인 헤드리스 세션에서 다음 틱에만 변경을 적용하고 리플레이에 기록한다. 두 방식 모두 현재 런타임을 유지한다. [Live Surgery 사용법](guide.md#futty-live-surgery)
 
 **첫 수락 시험**: 캐릭터/문/카메라가 있는 씬에서 **문의 색상과 동작 스크립트만 교체**하고 캐릭터·카메라·기타 오브젝트 UUID와 원래 플레이 결과를 보존한다. 의도적으로 잘못된 변경은 거부하고 원래 씬으로 정확하게 되돌린다.
 
@@ -370,7 +376,7 @@ AI 요청  ─┐
 
 | 순서 | 작업 | 반드시 통과할 조건 |
 | --- | --- | --- |
-| **S1 — Ghost MVP** | 기존 play_step/play_test 기반 Persona 정책, 시드 반복, 표준 리포트 | 3개 Persona × 3개 시드의 입력/결과·리플레이 재현 |
+| **S1 — Ghost MVP** | `ghost_batch_run`의 규칙 기반 Persona, 시드 반복, JSON 리포트 | 2D Coin Runner에서 3개 Persona × 3개 시드를 실행하고 `play_replay`로 검증 |
 | **S2 — Feel 공통 튜너** | Rust 설정 레지스트리, MCP, **사용자 직접 조정 슬라이더·숫자 입력**, 프리셋과 취소 | GUI와 AI가 같은 속도/점프값을 일관되게 적용·취소 |
 | **S3 — Surgery 안전한 부분 수정** | ChangeSet·영향 분석·기존 UUID 보존·트랜잭션·Undo | 문 하나 변경해도 다른 상태/씬 참조가 유지되고 실패 시 롤백 |
 | **S3+ — 개발용 Hot Reload** | 일부 안전한 컴포넌트부터 실행 중 틱 경계 적용 | 위치/체력 등 유지 대상 상태를 보존한 채 단일 변경 반영 |
@@ -489,7 +495,7 @@ Headless 로직 검증과 GPU 이미지 캡처는 별도 실행 경로다. GUI �
 - [게임 제작 스킬 카탈로그](game-skills.md): 개발에 필요한 AI 스킬의 사용 범위·라이선스.
 - [원스톱 제작 스킬](../.agents/skills/futty-one-shot-game/SKILL.md): AI가 전체 제작을 수행할 때 따라야 할 절차.
 - [AGENTS.md](../AGENTS.md) · [CLAUDE.md](../CLAUDE.md): 연결·실행 시 에이전트 지침.
-- [MCP 소스](../crates/futty-mcp/src/main.rs) · [프로토타입 생성기](../scripts/generate-prototype-assets.py): 실제 구현 상태의 권위 있는 근거.
+- [MCP 소스](../crates/futty-mcp/src/lib.rs) · [프로토타입 생성기](../scripts/generate-prototype-assets.py)의 실제 구현을 확인한다.
 
 ### 통합되어 정리한 이전 문서
 

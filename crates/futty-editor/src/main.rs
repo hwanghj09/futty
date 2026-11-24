@@ -1,5 +1,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod adaptive_quality;
+#[cfg(windows)]
+mod ai_setup;
 mod animation;
 mod assets;
 mod audio;
@@ -7,6 +10,7 @@ mod camera;
 mod context_menu;
 mod document;
 mod external_script;
+mod feel;
 mod hud_view;
 mod input;
 mod light;
@@ -53,6 +57,37 @@ fn main() -> eframe::Result {
     let executable = env::current_exe().ok();
     let args = env::args_os().collect::<Vec<_>>();
     let mode = args.get(1).and_then(|arg| arg.to_str());
+    if mode == Some("--mcp") {
+        if args.len() != 3 {
+            eprintln!("Usage: futty-editor --mcp WORKSPACE");
+            std::process::exit(2);
+        }
+        let editor = if cfg!(windows) { executable } else { None };
+        if let Err(error) = futty_mcp::run(Path::new(&args[2]), editor) {
+            eprintln!("Futty MCP failed: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    #[cfg(windows)]
+    if mode == Some("--setup-ai") {
+        let workspace = args.get(2).map(Path::new);
+        let client = args
+            .get(3)
+            .and_then(|arg| ai_setup::Client::parse(arg.to_str()?));
+        let (4, Some(workspace), Some(client)) = (args.len(), workspace, client) else {
+            eprintln!("Usage: futty-editor --setup-ai WORKSPACE codex|claude-code|claude-desktop");
+            std::process::exit(2);
+        };
+        match ai_setup::install(client, workspace) {
+            Ok(message) => println!("{message}"),
+            Err(error) => {
+                eprintln!("Futty AI setup failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if mode == Some("--export") {
         if args.len() != 4 {
             eprintln!("Usage: futty-editor --export SCENE_OR_PROJECT OUTPUT_FOLDER");
@@ -159,10 +194,11 @@ struct Editor {
     scene_rect: Option<egui::Rect>,
     game_rect: Option<egui::Rect>,
     game_aspect: f32,
-    range_controls: range_view::RangeControls,
+    range_controls: range_view::ViewportControls,
     input_settings: input::InputSettings,
     controls_open: bool,
     hud_open: bool,
+    feel: feel::FeelPanel,
     hud_selection: Option<Uuid>,
     animation_preview: Option<animation::Preview>,
     camera_preview: Option<Uuid>,
@@ -192,6 +228,8 @@ impl Play {
 
 #[derive(Clone, Copy)]
 enum Action {
+    #[cfg(windows)]
+    SetupAi(ai_setup::Client),
     New(SceneDimension),
     PhysicsPlayground,
     ScriptPlayground,
@@ -216,6 +254,8 @@ enum Action {
     Undo,
     Redo,
     PlayStop,
+    ReloadPlayTint,
+    PreviewFeel,
     Focus,
     FrameAll,
     Import,
@@ -238,7 +278,9 @@ enum Action {
     ResetPrefabOverrides(Uuid),
     EditScript(Uuid),
     EditScriptInFutty(Uuid),
-    ApplyScriptDraft { clear: bool },
+    ApplyScriptDraft {
+        clear: bool,
+    },
     AttachAudio(Uuid),
     PreviewAudio(Uuid),
     StopAudioPreview,
@@ -359,10 +401,11 @@ impl Editor {
             scene_rect: None,
             game_rect: None,
             game_aspect: 16.0 / 9.0,
-            range_controls: range_view::RangeControls::default(),
+            range_controls: range_view::ViewportControls::default(),
             input_settings: input::InputSettings::load(cc.storage),
             controls_open: false,
             hud_open: false,
+            feel: feel::FeelPanel::default(),
             hud_selection: None,
             animation_preview: None,
             camera_preview: None,
@@ -414,6 +457,7 @@ impl Editor {
     }
 
     fn reset_scene_camera(&mut self) {
+        self.feel.clear();
         self.viewport.reset_camera();
         if self.doc.scene.dimension == SceneDimension::TwoD {
             self.viewport.camera.eye = Vec3::Z * 10.0;
@@ -485,6 +529,13 @@ impl Editor {
                 .is_none_or(|parent| !parent.starts_with(&project.root))
         {
             self.report("Save the scene inside the project folder", true);
+            return false;
+        }
+        if !self.doc.disk_matches_saved(&path) {
+            self.report(
+                "Scene changed on disk. Reopen it or use Save As with a new file name.",
+                true,
+            );
             return false;
         }
         self.refresh_scripts();
@@ -577,8 +628,69 @@ impl Editor {
         }
     }
 
+    fn reload_play_tint(&mut self) -> Result<String, Box<dyn std::error::Error>> {
+        let Some(Play::Edited { runtime, .. }) = &mut self.play else {
+            return Err("Start Play from the saved edit scene first".into());
+        };
+        let path = self.doc.path.as_deref().ok_or("Save the scene first")?;
+        let id = self
+            .doc
+            .selection
+            .primary()
+            .ok_or("Select an object before starting Play")?;
+        let saved = Scene::load(path)?;
+        if saved.scene_uuid != self.doc.scene.scene_uuid {
+            return Err("The file now contains a different scene".into());
+        }
+        let object = saved
+            .entities
+            .iter()
+            .find(|object| object.uuid == id && object.has_renderer())
+            .ok_or("The selected object has no saved renderer")?;
+        runtime.set_play_tint(id, object.color)?;
+        Ok(format!("Reloaded {} tint in Play", object.name))
+    }
+
     fn execute(&mut self, action: Action) {
         match action {
+            Action::ReloadPlayTint => {
+                match self.reload_play_tint() {
+                    Ok(message) => self.report(message, false),
+                    Err(error) => self.report(error.to_string(), true),
+                }
+                return;
+            }
+            #[cfg(windows)]
+            Action::SetupAi(client) => {
+                let mut dialog =
+                    FileDialog::new().set_title("Choose a project folder for Futty MCP");
+                if let Some(folder) = self
+                    .project
+                    .as_ref()
+                    .map(project::Project::path)
+                    .or(self.doc.path.as_deref())
+                    .and_then(std::path::Path::parent)
+                {
+                    dialog = dialog.set_directory(folder);
+                }
+                if let Some(folder) = dialog.pick_folder() {
+                    let (message, error) = match ai_setup::install(client, &folder) {
+                        Ok(message) => (message.to_owned(), false),
+                        Err(error) => (error.to_string(), true),
+                    };
+                    MessageDialog::new()
+                        .set_title("Futty AI Setup")
+                        .set_description(&message)
+                        .set_level(if error {
+                            MessageLevel::Error
+                        } else {
+                            MessageLevel::Info
+                        })
+                        .show();
+                    self.report(message, error);
+                }
+                return;
+            }
             Action::EditMaterial(id) => {
                 self.inspected_asset = Some(InspectedAsset::Material(id));
                 self.show_panel(Panel::Inspector);
@@ -607,7 +719,8 @@ impl Editor {
             }
             _ => {}
         }
-        if matches!(action, Action::PlayStop) {
+        if matches!(action, Action::PlayStop | Action::PreviewFeel) {
+            self.viewport.reset_game_quality();
             self.sync_external_scripts();
             if let Some(play) = self.play.take() {
                 self.diagnostics = workspace::RunDiagnostics::capture(play.runtime());
@@ -615,18 +728,37 @@ impl Editor {
                 self.show_panel(Panel::Scene);
                 self.report("Stopped. Edit scene restored.", false);
             } else if self.apply_script_draft() {
-                match Runtime::new(&self.doc.scene) {
+                self.refresh_scripts();
+                let preview = if matches!(action, Action::PreviewFeel) {
+                    match self.feel.preview(&self.doc.scene) {
+                        Ok(scene) => Some(scene),
+                        Err(error) => {
+                            self.report(error, true);
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let scene = preview.as_ref().unwrap_or(&self.doc.scene);
+                match Runtime::new(scene) {
                     Ok(mut runtime) => {
                         self.audio.stop();
-                        self.refresh_scripts();
-                        runtime.start_scripts(&self.doc.scene, &self.script_sources());
+                        runtime.start_scripts(scene, &self.script_sources());
                         self.script_editor = None;
                         self.play = Some(Play::Edited {
                             runtime: Box::new(runtime),
                             camera: self.viewport.camera,
                         });
                         self.show_panel(Panel::Game);
-                        self.report("Playing a copy of the scene", false);
+                        if preview.is_some() {
+                            self.report(
+                                "Previewing the Feel draft. Stop, then apply to keep it.",
+                                false,
+                            );
+                        } else {
+                            self.report("Playing a copy of the scene", false);
+                        }
                     }
                     Err(error) => self.report(format!("Could not start Play: {error}"), true),
                 }
@@ -1135,10 +1267,31 @@ impl Editor {
                         self.show_panel(Panel::Game);
                         ui.close();
                     }
+                    if ui.button("Futty Feel").clicked() {
+                        self.feel.open = true;
+                        ui.close();
+                    }
+                    menu_item(
+                        ui,
+                        "Reload Selected Tint in Play",
+                        Action::ReloadPlayTint,
+                        matches!(self.play, Some(Play::Edited { .. }))
+                            && self.doc.path.is_some()
+                            && self.doc.selection.primary().is_some(),
+                        action,
+                    );
                     if ui.button("Game Controls     F10").clicked() {
                         self.controls_open = true;
                         ui.close();
                     }
+                });
+                #[cfg(windows)]
+                ui.add_enabled_ui(!playing, |ui| {
+                    ui.menu_button("AI", |ui| {
+                        for client in ai_setup::Client::ALL {
+                            menu_item(ui, client.name(), Action::SetupAi(client), true, action);
+                        }
+                    });
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.menu_button("Layout", |ui| {
@@ -1740,12 +1893,17 @@ impl Editor {
         {
             frame.instances[index].animation = Some(sample);
         }
-        self.viewport.render(
-            ui,
-            rect,
-            frame.render_scene(rect.aspect_ratio(), self.doc.scene.sky),
-            game,
-        );
+        let view = frame.render_scene(rect.aspect_ratio(), self.doc.scene.sky);
+        if game && playing {
+            self.viewport.render_game(
+                ui,
+                rect,
+                view,
+                !modal && !self.controls_open && !self.hud_open,
+            );
+        } else {
+            self.viewport.render(ui, rect, view, game);
+        }
         if game {
             let interactive = !modal
                 && !self.controls_open
@@ -1764,15 +1922,15 @@ impl Editor {
                 runtime,
                 interactive,
             );
+            let capture = !modal
+                && !self.controls_open
+                && !self.hud_open
+                && !hud_view::over_button(ui.ctx(), rect, &scene.hud);
             if let Some(status) = self
                 .play
                 .as_ref()
                 .and_then(|play| play.runtime().range_status())
             {
-                let capture = !modal
-                    && !self.controls_open
-                    && !self.hud_open
-                    && !hud_view::over_button(ui.ctx(), rect, &scene.hud);
                 self.range_controls.paint(
                     ui,
                     &response,
@@ -1781,6 +1939,9 @@ impl Editor {
                     scene.hud.is_empty(),
                     capture,
                 );
+            } else if playing && scene.input.capture_mouse {
+                self.range_controls
+                    .paint_first_person(ui, &response, capture);
             }
         }
         if game && (!playing || camera_index.is_some()) {
@@ -2029,17 +2190,18 @@ impl eframe::App for Editor {
                 .is_some_and(|play| play.runtime().range_status().is_some());
             let game = self
                 .game_rect
-                .filter(|_| !self.controls_open && !self.hud_open);
+                .filter(|_| self.play.is_some() && !self.controls_open && !self.hud_open);
             let scene = match &self.play {
                 Some(Play::Loaded(world)) => &world.scene,
                 _ => &self.doc.scene,
             };
+            let mode = input::MouseMode::for_scene(scene, is_range);
             let hud_blocks_mouse = self.range_controls.cursor_free()
                 && game.is_some_and(|rect| hud_view::over_button(&ctx, rect, &scene.hud));
             let (dt, keys, second) = self.range_controls.input(
                 &ctx,
                 game,
-                is_range,
+                mode,
                 &self.input_settings.with_profile(&scene.input),
                 hud_blocks_mouse,
                 scene.local_player_two().is_some(),
@@ -2056,9 +2218,11 @@ impl eframe::App for Editor {
                         (&mut world.runtime, &mut world.audio)
                     }
                 };
-                input::InputSettings::aim_character(&ctx, runtime, player, &keys);
-                runtime.local_game_input(keys, second);
-                runtime.tick(dt);
+                if dt > 0.0 {
+                    input::InputSettings::aim_character(&ctx, runtime, player, &keys, mode);
+                    runtime.local_game_input(keys, second);
+                    runtime.tick(dt);
+                }
                 audio_issue = audio_issue.or(audio::pump(audio, runtime));
                 if let Some(id) = runtime.take_scene_request() {
                     self.transition(&ctx, &id);
@@ -2163,6 +2327,7 @@ impl eframe::App for Editor {
             self.doc.scene.local_coop = coop;
         }
         self.hud_window(&ctx);
+        self.feel_window(&ctx, &mut action);
         self.doc.record_frame(
             before,
             ctx.egui_is_using_pointer() && ctx.input(|input| input.pointer.primary_down()),

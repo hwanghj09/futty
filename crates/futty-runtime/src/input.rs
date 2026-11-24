@@ -9,11 +9,13 @@ use crate::InputAction;
 pub struct InputProfile {
     pub bindings: BTreeMap<String, String>,
     pub sensitivity: Option<f32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub capture_mouse: bool,
 }
 
 impl InputProfile {
     pub fn is_empty(&self) -> bool {
-        self.bindings.is_empty() && self.sensitivity.is_none()
+        self.bindings.is_empty() && self.sensitivity.is_none() && !self.capture_mouse
     }
 
     pub fn validate(&self) -> Result<(), String> {

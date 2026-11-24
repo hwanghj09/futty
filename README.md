@@ -4,7 +4,7 @@
 
 [![Windows CI](https://github.com/hwanghj09/futty/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hwanghj09/futty/actions/workflows/ci.yml)
 
-[Windows 에디터 다운로드](https://github.com/hwanghj09/futty/raw/refs/heads/main/dist/futty-editor.exe) · [예제 포함 ZIP](https://github.com/hwanghj09/futty/archive/refs/heads/main.zip) · [사용 가이드](docs/guide.md) · [개발 로드맵](docs/FUTTY_FINAL_GOAL.md)
+[Windows 릴리스](https://github.com/hwanghj09/futty/releases) · [예제 포함 ZIP](https://github.com/hwanghj09/futty/archive/refs/heads/main.zip) · [사용 가이드](docs/guide.md) · [개발 로드맵](docs/FUTTY_FINAL_GOAL.md)
 
 씬·에셋·게임 규칙을 에디터에서 편집하거나 Codex와 Claude에 맡길 수 있습니다. 완성한 프로젝트는 MCP로 플레이테스트하고 Windows 게임으로 내보낼 수 있습니다.
 
@@ -14,7 +14,7 @@
 
 ## 사람용 시작 안내
 
-1. [Windows x64 에디터](https://github.com/hwanghj09/futty/raw/refs/heads/main/dist/futty-editor.exe)를 내려받고 `futty-editor.exe`를 실행합니다.
+1. [Windows 릴리스](https://github.com/hwanghj09/futty/releases)에 서명된 배포판이 있으면 `futty-editor.exe`를 내려받습니다. 첫 서명 배포 전에는 [소스에서 빌드하기](#소스에서-빌드하기)를 이용할 수 있습니다.
 2. 예제를 사용하려면 [저장소 ZIP](https://github.com/hwanghj09/futty/archive/refs/heads/main.zip)을 풀고, **File → Project → Open Project…**에서 `.futty.project.ron` 파일을 엽니다. 단일 씬은 **File → Open Scene…**에서 열 수 있습니다.
 3. **Play**를 눌러 조작해 봅니다. 내 게임을 시작할 때는 **File → Project → New 2D Project…** 또는 **New 3D Project…**에서 빈 폴더를 고릅니다. 씬·이미지·스크립트 등 게임에 쓰는 파일을 프로젝트 폴더에서 관리할 수 있습니다. [프로젝트와 씬 전환](docs/guide.md#프로젝트와-씬-전환)
 
@@ -28,6 +28,25 @@
 | [Planar Collision](examples/planar-collision/Planar%20Collision.futty.project.ron) | 충돌과 트리거를 관찰하는 2D 물리 예제 |
 
 [전체 예제 폴더](examples/) · [Windows 게임 내보내기](docs/guide.md#windows-게임-내보내기)
+
+### Windows 보안 경고가 표시될 때
+
+저장소의 [개발용 Windows EXE](https://github.com/hwanghj09/futty/raw/refs/heads/main/dist/futty-editor.exe)는 코드 서명이 없어 다운로드한 파일에서 SmartScreen 경고가 표시될 수 있습니다. Windows에서 실제 발행자와 서명 상태를 확인하려면 다음 명령을 실행합니다. [Microsoft SmartScreen 안내](https://learn.microsoft.com/windows/apps/package-and-deploy/smartscreen-reputation)
+
+```powershell
+Get-AuthenticodeSignature -LiteralPath .\futty-editor.exe |
+    Format-List Status, StatusMessage, SignerCertificate
+```
+
+[서명된 Windows 릴리스 준비](docs/guide.md#서명된-windows-릴리스-준비)
+
+### EXE에서 AI 연결하기
+
+`futty-editor.exe`에는 **Futty MCP 서버와 게임 제작 스킬**이 들어 있습니다. 에디터 상단의 **AI → Codex / Claude Code / Claude Desktop**에서 사용할 앱을 선택하고 작업할 게임 프로젝트 폴더를 고릅니다. 새 세션에서 해당 폴더를 열면 MCP로 게임을 제작할 수 있습니다.
+
+- Codex는 Codex CLI가 설치되어 있어야 합니다. Claude Code에서는 새 세션에서 프로젝트의 MCP 연결을 승인합니다.
+- Claude Desktop은 앱을 다시 열어 MCP를 연결합니다. 스킬은 프로젝트의 `.futty/claude-skills`에 생성된 ZIP을 **Customize → Skills**에서 가져옵니다.
+- 프로젝트에 이미 있는 스킬 파일은 보존됩니다. [EXE 연결 상세 가이드](docs/guide.md#exe에-포함된-mcp와-스킬)
 
 ### Codex에 설치부터 맡기기
 
@@ -91,7 +110,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Cli
 | 3D | GLB 메시와 스켈레톤 애니메이션, 재질·조명·그림자·Sky, 원근 카메라 |
 | 물리와 게임 규칙 | Rapier 2D·3D, 2D 박스·원·캡슐 충돌, 센서, 레이캐스트, 이동 발판, Rhai, HUD, 오디오 |
 | 에디터와 프로젝트 | 씬 계층, 스냅·Undo/Redo, 프리팹, 씬 전환, 로컬 2인 협동, Windows 내보내기 |
-| AI 제작과 검증 | 씬 수정 미리보기, 헤드리스 플레이테스트·리플레이, 카메라 PNG 캡처, 프로젝트 통합 검증 |
+| AI 제작과 검증 | 씬 수정 미리보기, 헤드리스 플레이테스트·리플레이, [Futty Ghost](docs/guide.md#futty-ghost-자동-플레이테스트), 카메라 PNG 캡처, 프로젝트 통합 검증 |
 
 구현 범위와 이후 개발 순서는 [Futty 통합 로드맵](docs/FUTTY_FINAL_GOAL.md)에서 확인할 수 있습니다.
 

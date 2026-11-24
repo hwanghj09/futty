@@ -1607,6 +1607,7 @@ dependencies = [
  "futty-audio",
  "futty-build",
  "futty-core",
+ "futty-mcp",
  "futty-render",
  "futty-runtime",
  "glam 0.33.12",

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
+    adaptive_quality::{AdaptiveQuality, RenderQuality},
     selection::Selection,
     transform_tool::{TransformGroup, TransformSettings},
 };
@@ -31,6 +32,7 @@ pub struct Viewport {
     orbiting: bool,
     gpu: RenderState,
     renderer: Renderer,
+    game_quality: AdaptiveQuality,
     hud_images: HashMap<Uuid, egui::TextureHandle>,
     views: [(Targets, egui::TextureId, wgpu::FilterMode); 2],
     drag: Option<AxisDrag>,
@@ -79,6 +81,7 @@ impl Viewport {
             orbiting: false,
             gpu,
             renderer,
+            game_quality: AdaptiveQuality::default(),
             hud_images: HashMap::new(),
             views,
             drag: None,
@@ -155,13 +158,40 @@ impl Viewport {
             .map(|image| (image.id(), image.size_vec2()))
     }
 
-    pub fn render(&mut self, ui: &egui::Ui, rect: Rect, mut scene: RenderScene<'_>, game: bool) {
+    pub fn reset_game_quality(&mut self) {
+        self.game_quality = AdaptiveQuality::default();
+    }
+
+    pub fn render(&mut self, ui: &egui::Ui, rect: Rect, scene: RenderScene<'_>, game: bool) {
+        self.render_view(ui, rect, scene, game, RenderQuality::FULL);
+    }
+
+    pub fn render_game(&mut self, ui: &egui::Ui, rect: Rect, scene: RenderScene<'_>, sample: bool) {
+        if ui.ctx().current_pass_index() == 0 {
+            let interval = ui.input(|input| {
+                (sample && input.focused && input.viewport().minimized != Some(true))
+                    .then_some(input.unstable_dt)
+            });
+            self.game_quality.sample(interval);
+        }
+        self.render_view(ui, rect, scene, true, self.game_quality.quality());
+    }
+
+    fn render_view(
+        &mut self,
+        ui: &egui::Ui,
+        rect: Rect,
+        mut scene: RenderScene<'_>,
+        game: bool,
+        quality: RenderQuality,
+    ) {
         let max = self.gpu.device.limits().max_texture_dimension_2d;
         let scale = ui.pixels_per_point();
-        let size =
+        let native_size =
             [rect.width(), rect.height()].map(|side| ((side * scale).round() as u32).clamp(1, max));
         let (targets, image, current_filter) = &mut self.views[usize::from(game)];
         let pixel_grid = scene.pixel_view.is_some();
+        let size = quality.target_size(native_size, pixel_grid);
         let filter = if pixel_grid {
             wgpu::FilterMode::Nearest
         } else {
@@ -184,8 +214,13 @@ impl Viewport {
             *current_filter = filter;
         }
         scene.grid = self.grid && !game;
-        self.renderer
-            .draw(&self.gpu.device, &self.gpu.queue, targets, scene);
+        self.renderer.draw_with_shadow_scale(
+            &self.gpu.device,
+            &self.gpu.queue,
+            targets,
+            scene,
+            quality.shadow_scale(),
+        );
         let image_rect = if pixel_grid {
             let min = Pos2::new(
                 (rect.min.x * scale).round() / scale,

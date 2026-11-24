@@ -14,6 +14,9 @@ pub(crate) struct SetInput {
     pub bindings: BTreeMap<String, String>,
     /// Scene sensitivity from 0.1 to 4.0. Omit to use the player's setting.
     pub sensitivity: Option<f32>,
+    /// Capture the pointer on click for mouse-look until Escape or loss of focus.
+    #[serde(default)]
+    pub capture_mouse: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]

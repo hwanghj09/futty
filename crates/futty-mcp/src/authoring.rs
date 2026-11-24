@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fmt::Display, path::PathBuf};
 
 use futty_core::{AssetKind, Light, LightKind, Primitive};
 use futty_runtime::{
-    Body, CharacterController, HudAnchor, HudKind, HudWidget, Motion, Object, Scene,
+    Body, CharacterController, CharacterFeel, HudAnchor, HudKind, HudWidget, Motion, Object, Scene,
 };
 use glam::{EulerRot, Quat, Vec2, Vec3};
 use rmcp::{ErrorData, model::CallToolResult, schemars};
@@ -149,6 +149,11 @@ enum Operation {
     SetComponent {
         object: String,
         component: ComponentPatch,
+    },
+    TuneCharacter {
+        object: String,
+        speed: Option<f32>,
+        jump_speed: Option<f32>,
     },
     RemoveComponent {
         object: String,
@@ -322,7 +327,35 @@ impl Properties {
     }
 }
 
+pub(crate) fn read_revision(path: &std::path::Path) -> Result<(Scene, String), ErrorData> {
+    let original = std::fs::read_to_string(path).map_err(crate::io_error)?;
+    let mut fingerprint = crate::replay::Fingerprint::new();
+    fingerprint.add(original.as_bytes());
+    Ok((
+        Scene::decode(&original).map_err(crate::io_error)?,
+        fingerprint.finish(),
+    ))
+}
+
 impl Batch {
+    pub fn tune_character(
+        path: String,
+        expected_revision: Option<String>,
+        object: Uuid,
+        speed: Option<f32>,
+        jump_speed: Option<f32>,
+    ) -> Self {
+        Self {
+            path,
+            expected_revision,
+            edits: vec![Operation::TuneCharacter {
+                object: object.to_string(),
+                speed,
+                jump_speed,
+            }],
+        }
+    }
+
     pub fn place_prefab(input: crate::PlacePrefab) -> Self {
         Self {
             path: input.path,
@@ -347,10 +380,7 @@ impl Batch {
     }
 
     pub fn read(&self, path: &std::path::Path) -> Result<(Scene, String), ErrorData> {
-        let original = std::fs::read_to_string(path).map_err(crate::io_error)?;
-        let mut fingerprint = crate::replay::Fingerprint::new();
-        fingerprint.add(original.as_bytes());
-        let revision = fingerprint.finish();
+        let (scene, revision) = read_revision(path)?;
         if let Some(expected) = &self.expected_revision
             && *expected != revision
         {
@@ -359,7 +389,7 @@ impl Batch {
                 Some(json!({"expected_revision":expected,"current_revision":revision})),
             ));
         }
-        Ok((Scene::decode(&original).map_err(crate::io_error)?, revision))
+        Ok((scene, revision))
     }
 
     pub fn prepare(self, before: &Scene) -> Result<(Scene, BTreeMap<String, Uuid>), ErrorData> {
@@ -475,6 +505,31 @@ fn apply_edit(
         Operation::SetComponent { object, component } => {
             let index = object_index(&object, scene, keys)?;
             component.apply(&mut scene.entities[index])?;
+        }
+        Operation::TuneCharacter {
+            object,
+            speed,
+            jump_speed,
+        } => {
+            let index = object_index(&object, scene, keys)?;
+            let controller = scene.entities[index]
+                .character
+                .as_mut()
+                .ok_or_else(|| invalid("Object must already have a character controller"))?;
+            if speed.is_none() && jump_speed.is_none() {
+                return Err(invalid("Provide a move speed or jump speed"));
+            }
+            if jump_speed.is_some()
+                && !CharacterFeel::supports_jump(controller.mode, scene.dimension)
+            {
+                return Err(invalid("This character's movement mode does not jump"));
+            }
+            CharacterFeel {
+                speed: speed.unwrap_or(controller.speed),
+                jump_speed: jump_speed.unwrap_or(controller.jump_speed),
+            }
+            .apply(controller)
+            .map_err(invalid)?;
         }
         Operation::RemoveComponent { object, component } => {
             let index = object_index(&object, scene, keys)?;

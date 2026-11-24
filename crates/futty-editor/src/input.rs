@@ -15,6 +15,25 @@ const PLAYER_TWO: [Key; InputAction::ALL.len()] = [
     Key::J,
 ];
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MouseMode {
+    Drag,
+    FirstPerson,
+    Range,
+}
+
+impl MouseMode {
+    pub(crate) fn for_scene(scene: &Scene, is_range: bool) -> Self {
+        if is_range {
+            Self::Range
+        } else if scene.input.capture_mouse {
+            Self::FirstPerson
+        } else {
+            Self::Drag
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Binding {
     Key(Key),
@@ -86,9 +105,10 @@ impl InputSettings {
         runtime: &mut futty_runtime::Runtime,
         player: Option<uuid::Uuid>,
         input: &GameInput,
+        mode: MouseMode,
     ) {
         if input.mouse_delta != glam::Vec2::ZERO
-            && ctx.input(|state| state.pointer.secondary_down())
+            && (mode == MouseMode::FirstPerson || ctx.input(|state| state.pointer.secondary_down()))
             && let Some(id) = player
         {
             runtime.look_character(id, input.mouse_delta.x * 0.12, -input.mouse_delta.y * 0.12);
@@ -161,6 +181,34 @@ impl InputSettings {
                 .filter(|&key| available(key) && input.key_down(key))
                 .map(Key::name)
                 .collect(),
+            pressed_keys: input
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    } if available(*key) => Some(key.name()),
+                    _ => None,
+                })
+                .collect(),
+            wheel_y: if mouse {
+                input
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        Event::MouseWheel { unit, delta, .. } => Some(match unit {
+                            egui::MouseWheelUnit::Point => delta.y / 40.0,
+                            egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => delta.y,
+                        }),
+                        _ => None,
+                    })
+                    .sum()
+            } else {
+                0.0
+            },
             actions,
             mouse_delta: glam::vec2(delta.x, delta.y) * self.sensitivity,
             ..Default::default()
@@ -174,6 +222,8 @@ impl InputSettings {
         };
         let mut game = settings.sample(input, false, false);
         game.held
+            .retain(|name| PLAYER_TWO.iter().any(|key| key.name() == *name));
+        game.pressed_keys
             .retain(|name| PLAYER_TWO.iter().any(|key| key.name() == *name));
         game
     }
@@ -377,6 +427,7 @@ mod tests {
         let profile = InputProfile {
             bindings: [("MoveForward".into(), "ArrowUp".into())].into(),
             sensitivity: Some(2.0),
+            ..Default::default()
         };
         profile.validate().unwrap();
         let effective = personal.with_profile(&profile);

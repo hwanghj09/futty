@@ -18,3 +18,12 @@ futty-audio = { path = "crates/futty-audio" }
 futty-build = { path = "crates/futty-build" }
 futty-render = { path = "crates/futty-render" }
 futty-runtime = { path = "crates/futty-runtime" }
+
+[profile.release]
+strip = "symbols"
+
+[profile.release.package.futty-editor]
+opt-level = "s"
+
+[profile.release.package.futty-mcp]
+opt-level = "s"

@@ -45,6 +45,18 @@ impl Document {
         self.scene != self.saved
     }
 
+    pub fn disk_matches_saved(&self, path: &std::path::Path) -> bool {
+        let Some(saved_path) = self.path.as_deref() else {
+            return true;
+        };
+        let same_path = saved_path == path
+            || saved_path
+                .canonicalize()
+                .ok()
+                .is_some_and(|saved| path.canonicalize().ok() == Some(saved));
+        !same_path || Scene::load(path).is_ok_and(|scene| scene == self.saved)
+    }
+
     pub fn saved_asset_path(&self, id: Uuid) -> Option<&std::path::Path> {
         self.path
             .as_deref()

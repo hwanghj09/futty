@@ -7,8 +7,8 @@ use std::{
 };
 
 use futty_runtime::{
-    ActionState, FIXED_STEP_SECONDS, GameInput, GameOutcome, Hierarchy, HudKind, InputAction,
-    Object, Runtime, Scene, SceneDimension, ScriptValue,
+    ActionState, CharacterMode, FIXED_STEP_SECONDS, GameInput, GameOutcome, Hierarchy, HudKind,
+    InputAction, Object, Runtime, Scene, SceneDimension, ScriptValue,
 };
 use glam::Vec3;
 use rmcp::{ErrorData, model::CallToolResult, schemars};
@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     authoring::invalid,
+    ghost::{self, Persona},
     io_error,
     replay::{Fingerprint, MAX_TICKS, Mark, PlayTest, Replay},
     report::{self, Code, Context, Evidence, Stage},
@@ -26,7 +27,10 @@ use crate::{
 const MAX_SESSIONS: usize = 4;
 const MAX_STEP_TICKS: u32 = 120;
 const MAX_VISIBLE: usize = 32;
-const MOVEMENT_ACTIONS: [&str; 6] = ["forward", "backward", "left", "right", "jump", "interact"];
+const GHOST_STEP_TICKS: u32 = 6;
+const PLAY_ACTIONS: [&str; 9] = [
+    "forward", "backward", "left", "right", "jump", "interact", "fire", "reload", "retry",
+];
 
 type Sessions = HashMap<Uuid, Session>;
 type Job = Box<dyn FnOnce(&mut Sessions) + Send>;
@@ -99,10 +103,39 @@ impl PlayRunner {
                     ticks: input.ticks,
                     look: input.look,
                     players: input.players,
+                    tint: current.pending_tint,
                 },
                 |_| {},
             )?;
+            current.pending_tint = None;
             current.observe(input.session_id)
+        })
+    }
+
+    pub fn queue_tint(&self, input: HotReload) -> Result<CallToolResult, ErrorData> {
+        self.call(move |sessions| {
+            let current = session(sessions, input.session_id)?;
+            if current.status() != Status::Running {
+                return Err(invalid("This play session has ended"));
+            }
+            if current.tick != input.expected_tick {
+                return Err(invalid(format!(
+                    "Tick changed; current tick is {}",
+                    current.tick
+                )));
+            }
+            if current.pending_tint.is_some() {
+                return Err(invalid(
+                    "Advance Play to apply the queued tint before queuing another",
+                ));
+            }
+            current.validate_tint(input.tint)?;
+            current.pending_tint = Some(input.tint);
+            Ok(CallToolResult::structured(json!({
+                "object_id": input.tint.object_id,
+                "color": input.tint.color,
+                "applies_at_tick": current.tick + 1,
+            })))
         })
     }
 
@@ -262,6 +295,80 @@ impl PlayRunner {
             })))
         })
     }
+
+    pub fn ghost_batch(
+        &self,
+        path: PathBuf,
+        input: ghost::Batch,
+        output: PathBuf,
+        max_ticks: u32,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.call(move |_| {
+            if output.symlink_metadata().is_ok() {
+                return Err(invalid("Choose a new Ghost output directory"));
+            }
+            let source = PlaySource::load(&path)?;
+            let parent = output.parent().ok_or_else(|| invalid("Ghost requires a parent directory"))?;
+            let stage = tempfile::Builder::new().prefix(".futty-ghost-").tempdir_in(parent).map_err(io_error)?;
+            let output_path = input.output_path.trim_end_matches(['/', '\\']);
+            let tag = input.target_tag.as_deref().unwrap_or("coin");
+            let mut runs = Vec::new();
+            let mut summary = Vec::new();
+            for &persona in &input.personas {
+                let mut successes = 0;
+                for &seed in &input.seeds {
+                    let mut current = Session::from_source(source.clone(), input.path.clone(), max_ticks, seed)?;
+                    let evidence = current.ghost_run(persona, tag)?;
+                    let filename = format!("{}-{seed}.json", persona.label());
+                    current.replay.save(&stage.path().join(&filename))?;
+                    let status = current.status();
+                    successes += usize::from(status == Status::Success);
+                    let terminal = current.replay.marks.last().expect("Recorded initial tick");
+                    runs.push(json!({
+                        "persona":persona,
+                        "seed":seed,
+                        "status":status,
+                        "tick":current.tick,
+                        "reason":match status {
+                            Status::Success => "game_reported_success",
+                            Status::Failure => "game_reported_failure",
+                            Status::TickLimit => "tick_budget_exhausted",
+                            Status::SceneTransition => "scene_transition_requested",
+                            Status::Running => unreachable!("Ghost runs until a terminal status"),
+                        },
+                        "first_failure_tick":matches!(status, Status::Failure | Status::TickLimit).then_some(current.tick),
+                        "first_stall_tick":evidence,
+                        "player_position":terminal.player_position,
+                        "requested_scene":current.requested_scene,
+                        "hud":current.hud(),
+                        "decision_count":current.replay.steps.len(),
+                        "replay_path":format!("{output_path}/{filename}"),
+                    }));
+                }
+                summary.push(json!({"persona":persona,"runs":input.seeds.len(),"successes":successes}));
+            }
+            let result = json!({
+                "format":1,
+                "engine_version":env!("CARGO_PKG_VERSION"),
+                "scene":input.path,
+                "source_digest":source.digest,
+                "target_tag":tag,
+                "max_ticks":max_ticks,
+                "report_path":format!("{output_path}/report.json"),
+                "summary":summary,
+                "runs":runs,
+            });
+            let report = fs::File::create(stage.path().join("report.json")).map_err(io_error)?;
+            serde_json::to_writer_pretty(&report, &result).map_err(io_error)?;
+            report.sync_all().map_err(io_error)?;
+            drop(report);
+            if output.symlink_metadata().is_ok() {
+                return Err(invalid("Ghost output directory already exists"));
+            }
+            fs::rename(stage.path(), &output).map_err(io_error)?;
+            Ok(CallToolResult::structured(result))
+        })
+    }
 }
 
 fn compare_marks(expected: &[Mark], actual: &[Mark], offset: usize) -> Option<CallToolResult> {
@@ -312,6 +419,25 @@ pub(crate) struct SessionId {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct HotReload {
+    #[schemars(with = "String")]
+    session_id: Uuid,
+    /// Last observed simulation tick.
+    expected_tick: u32,
+    tint: PlayTint,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PlayTint {
+    #[schemars(with = "String")]
+    object_id: Uuid,
+    /// Normalized RGB channels from 0 to 1.
+    color: [f32; 3],
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Step {
     #[schemars(with = "String")]
     session_id: Uuid,
@@ -337,6 +463,9 @@ enum Action {
     Right,
     Jump,
     Interact,
+    Fire,
+    Reload,
+    Retry,
 }
 
 #[derive(Deserialize, Serialize, schemars::JsonSchema)]
@@ -352,6 +481,9 @@ pub(crate) struct Controls {
     /// Independent inputs for up to four characters in the same simulation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     players: Vec<PlayerControls>,
+    /// Apply a visual tint before this step's first fixed tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tint: Option<PlayTint>,
 }
 
 #[derive(Deserialize, Serialize, schemars::JsonSchema)]
@@ -396,8 +528,8 @@ fn step_input(held: HeldActions, previous: HeldActions, first: bool) -> GameInpu
 impl Controls {
     pub fn validate(&self) -> Result<u32, ErrorData> {
         let ticks = self.ticks.unwrap_or(1);
-        if !(1..=MAX_STEP_TICKS).contains(&ticks) || self.actions.len() > MOVEMENT_ACTIONS.len() {
-            return Err(invalid("Use 1 to 120 ticks and up to six actions"));
+        if !(1..=MAX_STEP_TICKS).contains(&ticks) || self.actions.len() > PLAY_ACTIONS.len() {
+            return Err(invalid("Use 1 to 120 ticks and up to nine actions"));
         }
         if !valid_look(self.look) {
             return Err(invalid("Look angles must be between -180 and 180 degrees"));
@@ -410,7 +542,7 @@ impl Controls {
                 || self.players.iter().any(|player| {
                     player.player_id.is_nil()
                         || !ids.insert(player.player_id)
-                        || player.actions.len() > MOVEMENT_ACTIONS.len()
+                        || player.actions.len() > PLAY_ACTIONS.len()
                         || !valid_look(player.look)
                 })
             {
@@ -442,10 +574,14 @@ impl Action {
             Self::Right => InputAction::MoveRight,
             Self::Jump => InputAction::Jump,
             Self::Interact => InputAction::Interact,
+            Self::Fire => InputAction::Fire,
+            Self::Reload => InputAction::Reload,
+            Self::Retry => InputAction::Retry,
         }
     }
 }
 
+#[derive(Clone)]
 struct PlaySource {
     scene: Scene,
     scripts: HashMap<Uuid, String>,
@@ -490,9 +626,164 @@ struct Session {
     player_held: BTreeMap<Uuid, HeldActions>,
     requested_scene: Option<String>,
     replay: Replay,
+    pending_tint: Option<PlayTint>,
 }
 
 impl Session {
+    fn ghost_run(&mut self, persona: Persona, tag: &str) -> Result<Option<u32>, ErrorData> {
+        const STALL_TICKS: u32 = 30;
+        const STALL_DISTANCE_SQUARED: f32 = 0.02 * 0.02;
+        let mode = self.scene.entities[self.player_index]
+            .character
+            .expect("playable scene")
+            .mode;
+        let mut movement_start = None;
+        let mut first_stall_tick = None;
+        while self.status() == Status::Running {
+            let actions = self.ghost_actions(persona, tag)?;
+            let moving = actions.iter().any(|action| {
+                matches!(
+                    action,
+                    Action::Forward | Action::Backward | Action::Left | Action::Right
+                )
+            });
+            self.step(
+                Controls {
+                    actions,
+                    ticks: Some(GHOST_STEP_TICKS),
+                    look: None,
+                    players: Vec::new(),
+                    tint: None,
+                },
+                |state| {
+                    let marks = &state.replay.marks;
+                    if !moving {
+                        movement_start = None;
+                        return;
+                    }
+                    let (start_tick, start) = movement_start.get_or_insert_with(|| {
+                        (
+                            state.tick,
+                            Vec3::from(marks[marks.len() - 2].player_position),
+                        )
+                    });
+                    let position = Vec3::from(marks[marks.len() - 1].player_position);
+                    let mut delta = position - *start;
+                    if mode == CharacterMode::Spatial {
+                        delta.y = 0.0;
+                    } else if mode == CharacterMode::SideScroller {
+                        delta.y = 0.0;
+                        delta.z = 0.0;
+                    }
+                    if delta.length_squared() >= STALL_DISTANCE_SQUARED {
+                        movement_start = Some((state.tick + 1, position));
+                    } else if state.tick + 1 - *start_tick >= STALL_TICKS {
+                        first_stall_tick.get_or_insert(*start_tick);
+                    }
+                },
+            )?;
+        }
+        Ok(first_stall_tick)
+    }
+
+    fn ghost_actions(&mut self, persona: Persona, tag: &str) -> Result<Vec<Action>, ErrorData> {
+        let seed = self.replay.seed;
+        if persona == Persona::Beginner && self.tick < 8 + seed % 12 {
+            return Ok(Vec::new());
+        }
+        let observation = self.observation()?;
+        let controller = self.scene.entities[self.player_index]
+            .character
+            .expect("playable scene");
+        let mode = controller.mode;
+        if persona != Persona::Beginner
+            && !observation["player"]["interaction"].is_null()
+            && !self.held[InputAction::Interact as usize]
+        {
+            return Ok(vec![Action::Interact]);
+        }
+        if persona == Persona::Explorer && self.tick < 36 + seed % 12 {
+            return Ok(vec![if seed.is_multiple_of(2) {
+                Action::Left
+            } else {
+                Action::Right
+            }]);
+        }
+
+        let position = Vec3::from(
+            self.replay
+                .marks
+                .last()
+                .expect("Recorded initial tick")
+                .player_position,
+        );
+        let target = observation["visible_objects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|object| {
+                object["tags"]
+                    .as_array()
+                    .is_some_and(|tags| tags.iter().any(|value| value.as_str() == Some(tag)))
+            })
+            .filter_map(|object| {
+                serde_json::from_value::<[f32; 3]>(object["position"].clone()).ok()
+            })
+            .map(|target| Vec3::from(target) - position)
+            .min_by(|a, b| a.length_squared().total_cmp(&b.length_squared()));
+        let mut actions = Vec::with_capacity(3);
+        if mode == CharacterMode::SideScroller {
+            let sign = if target.is_some_and(|delta| delta.x < 0.0) {
+                -1.0
+            } else {
+                1.0
+            };
+            actions.push(if sign < 0.0 {
+                Action::Left
+            } else {
+                Action::Right
+            });
+            if persona == Persona::GoalDriven && !self.held[InputAction::Jump as usize] {
+                let feet = position - Vec3::Y * (controller.origin_height - 0.16);
+                let lead = controller.radius
+                    + controller.speed * FIXED_STEP_SECONDS * GHOST_STEP_TICKS as f32
+                    + 0.12;
+                let ground = |point| {
+                    self.runtime
+                        .raycast(point, Vec3::NEG_Y, 0.32, controller.collision_mask)
+                        .is_some()
+                };
+                if ground(feet) && !ground(feet + Vec3::X * lead * sign) {
+                    actions.push(Action::Jump);
+                }
+            }
+        } else if let Some(delta) = target {
+            let (side, ahead) = if mode == CharacterMode::TopDown2d {
+                (delta.x, delta.y)
+            } else {
+                let forward =
+                    serde_json::from_value::<[f32; 3]>(observation["player"]["forward"].clone())
+                        .map(Vec3::from)
+                        .unwrap_or(Vec3::NEG_Z);
+                let forward = Vec3::new(forward.x, 0.0, forward.z)
+                    .try_normalize()
+                    .unwrap_or(Vec3::NEG_Z);
+                (delta.dot(forward.cross(Vec3::Y)), delta.dot(forward))
+            };
+            for (distance, positive, negative) in [
+                (side, Action::Right, Action::Left),
+                (ahead, Action::Forward, Action::Backward),
+            ] {
+                if distance.abs() > 0.08 {
+                    actions.push(if distance > 0.0 { positive } else { negative });
+                }
+            }
+        } else {
+            actions.push(Action::Forward);
+        }
+        Ok(actions)
+    }
+
     fn load(path: &Path, scene_path: String, max_ticks: u32, seed: u32) -> Result<Self, ErrorData> {
         if !(1..=MAX_TICKS).contains(&max_ticks) {
             return Err(invalid("max_ticks must be between 1 and 36000"));
@@ -532,6 +823,7 @@ impl Session {
             player_held: BTreeMap::new(),
             requested_scene,
             replay: Replay::new(scene_path, digest, seed, max_ticks),
+            pending_tint: None,
         };
         session.record_tick();
         Ok(session)
@@ -547,6 +839,20 @@ impl Session {
         }
     }
 
+    fn validate_tint(&self, tint: PlayTint) -> Result<(), ErrorData> {
+        if !self
+            .scene
+            .entities
+            .iter()
+            .any(|object| object.uuid == tint.object_id && object.has_renderer())
+        {
+            return Err(invalid("Tint requires a saved object with a renderer"));
+        }
+        self.runtime
+            .validate_play_tint(tint.object_id, tint.color)
+            .map_err(invalid)
+    }
+
     fn step(
         &mut self,
         input: Controls,
@@ -556,6 +862,9 @@ impl Session {
             return Err(invalid("This play session has ended"));
         }
         let ticks = input.validate()?;
+        if let Some(tint) = input.tint {
+            self.validate_tint(tint)?;
+        }
         if input.players.iter().any(|player| {
             !self.scene.entities.iter().any(|object| {
                 object.uuid == player.player_id
@@ -579,6 +888,11 @@ impl Session {
                 .look_character(self.scene.entities[self.player_index].uuid, yaw, pitch)
         {
             return Err(invalid("Only a spatial character accepts look"));
+        }
+        if let Some(tint) = input.tint {
+            self.runtime
+                .set_play_tint(tint.object_id, tint.color)
+                .map_err(invalid)?;
         }
         let held = held_actions(&input.actions);
         let player_held: BTreeMap<_, _> = input
@@ -696,7 +1010,7 @@ impl Session {
         let state: HashMap<_, _> = self
             .runtime
             .extract()
-            .map(|(id, transform, _)| (id, transform))
+            .map(|(id, transform, color)| (id, (transform, color)))
             .collect();
         let sprites: HashMap<_, _> = self.runtime.animated_sprites().collect();
         let objects = self
@@ -707,7 +1021,11 @@ impl Session {
         let hierarchy = Hierarchy::from_objects(objects.clone()).map_err(io_error)?;
         let local: Vec<_> = objects
             .clone()
-            .map(|object| state.get(&object.uuid).copied().unwrap_or(object.transform))
+            .map(|object| {
+                state
+                    .get(&object.uuid)
+                    .map_or(object.transform, |&(pose, _)| pose)
+            })
             .collect();
         let worlds = hierarchy.world_matrices(|index| local[index].matrix());
         let camera = self
@@ -762,6 +1080,7 @@ impl Session {
                         "position": position.to_array(),
                         "distance": distance,
                         "health": self.runtime.health_state(object.uuid),
+                        "color": state.get(&object.uuid).map_or(object.color, |&(_, color)| color),
                     });
                     if let Some((sheet, time)) = sprites.get(&object.uuid).copied().or_else(|| {
                         object
@@ -785,7 +1104,7 @@ impl Session {
         let focus = focus_for(primary);
         let players: Vec<_> = self.scene.entities.iter().filter(|object| object.character.is_some())
             .map(|object| {
-                let pose = state.get(&object.uuid).copied().unwrap_or(object.transform);
+                let pose = state.get(&object.uuid).map_or(object.transform, |&(pose, _)| pose);
                 let interaction = if object.uuid == primary { focus.clone() } else { focus_for(object.uuid) };
                 json!({
                     "id":object.uuid,"active":self.runtime.is_active(object.uuid),"position":pose.translation.to_array(),
@@ -817,7 +1136,7 @@ impl Session {
             "hud": self.hud(),
             "game_state": game_state,
             "visible_objects": visible_objects,
-            "actions": if status == Status::Running { &MOVEMENT_ACTIONS[..] } else { &[] },
+            "actions": if status == Status::Running { &PLAY_ACTIONS[..] } else { &[] },
         }))
     }
 }

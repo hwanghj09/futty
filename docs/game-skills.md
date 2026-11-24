@@ -64,6 +64,7 @@ ABA Games의 공개 스킬을 참고해 Futty 도구로 실행할 수 있는 지
 | --- | --- |
 | [Futty 레벨 설계](../.agents/skills/futty-level-design/SKILL.md) | 목표 경로를 배치하고 우회로와 장애물 판정을 검증 |
 | [Futty 게임 피드백](../.agents/skills/futty-game-feel/SKILL.md) | 상호작용, 아이템 획득, 충돌 상태를 HUD와 시청각 효과로 전달 |
+| [Futty 게임 UI 디자인](../.agents/skills/futty-game-ui/SKILL.md) | 로비, 메뉴, HUD, 결과 화면의 정보 배치와 입력·상태 바인딩을 설계하고 Play로 검증 |
 | [Futty 밸런스 검증](../.agents/skills/futty-balance/SKILL.md) | 같은 조건에서 전략별 성공률, 소요 틱, 기록된 점수를 비교 |
 | [Futty 토큰 최적화](../.agents/skills/futty-token-optimization/SKILL.md) | RTK 출력 압축, MCP 조회 범위와 호출 수 조절, 실패 진단 보존 |
 | [Ponytail](../.agents/skills/ponytail/SKILL.md) | 기존 코드를 재사용해 요구사항을 충족하는 가장 작은 변경을 구현하고 검증. [원본 5.3.3](https://github.com/DietrichGebert/ponytail/tree/96608e078b2d5ea607c5c3b8b5a54d1c1fba6846/skills/ponytail) · [MIT 라이선스](../.agents/skills/ponytail/LICENSE) |
@@ -78,7 +79,6 @@ ABA Games의 공개 스킬을 참고해 Futty 도구로 실행할 수 있는 지
 | `futty-rig-animation` | 리그·클립 이름 → 시작 클립, 반복·속도 설정, 전환 테스트 | GLB 애니메이션, Rhai |
 | `futty-sprite-assets` | 원본 이미지 → 크기와 투명도를 맞춘 PNG, 배치용 참조 | PNG, Sprite3D |
 | `futty-game-audio` | 게임 이벤트 → WAV·OGG와 재생 조건 | 오디오 소스, 이벤트 |
-| `futty-hud` | 점수·체력·목표 상태 → HUD 배치와 값·버튼 바인딩 | Game HUD, Rhai |
 | `futty-ai-navigation` | 목표·이동 제한 → 웨이포인트와 순찰·복귀 규칙 | 캐릭터 컨트롤러, 길찾기 |
 | `futty-ai-player` | 플레이어 관찰 → 이동·시점 회전·점프·상호작용 | 관찰·행동 API, 고정 틱 진행 |
 | `futty-playtest` | 씬·시드·성공 조건 → 재현 절차, 판정, 마지막 관찰 | 헤드리스 실행, 판정 이벤트 |

@@ -1,7 +1,7 @@
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
-use crate::{GameInput, InputAction, physics::Physics};
+use crate::{GameInput, InputAction, SceneDimension, physics::Physics};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,8 +46,8 @@ impl Default for CharacterController {
             radius: 0.30,
             height: 1.75,
             origin_height: 1.65,
-            speed: 4.4,
-            jump_speed: 4.7,
+            speed: CharacterFeel::DEFAULT.speed,
+            jump_speed: CharacterFeel::DEFAULT.jump_speed,
             coyote_time: 0.0,
             jump_buffer: 0.0,
             collision_mask: u32::MAX,
@@ -61,10 +61,67 @@ impl CharacterController {
         (0.05..=2.0).contains(&self.radius)
             && (self.radius * 2.0..=8.0).contains(&self.height)
             && (0.0..=8.0).contains(&self.origin_height)
-            && (0.1..=50.0).contains(&self.speed)
-            && (0.0..=30.0).contains(&self.jump_speed)
+            && CharacterFeel::SPEED_RANGE.contains(&self.speed)
+            && CharacterFeel::JUMP_RANGE.contains(&self.jump_speed)
             && (0.0..=0.25).contains(&self.coyote_time)
             && (0.0..=0.25).contains(&self.jump_buffer)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct CharacterFeel {
+    pub speed: f32,
+    pub jump_speed: f32,
+}
+
+impl CharacterFeel {
+    pub const SPEED_RANGE: std::ops::RangeInclusive<f32> = 0.1..=50.0;
+    pub const JUMP_RANGE: std::ops::RangeInclusive<f32> = 0.0..=30.0;
+    pub const DEFAULT: Self = Self {
+        speed: 4.4,
+        jump_speed: 4.7,
+    };
+    pub const PRESETS: [(&str, Self); 3] = [
+        (
+            "Steady",
+            Self {
+                speed: 3.2,
+                jump_speed: 3.8,
+            },
+        ),
+        ("Default", Self::DEFAULT),
+        (
+            "Agile",
+            Self {
+                speed: 6.0,
+                jump_speed: 6.0,
+            },
+        ),
+    ];
+
+    pub fn read(controller: CharacterController) -> Self {
+        Self {
+            speed: controller.speed,
+            jump_speed: controller.jump_speed,
+        }
+    }
+
+    pub fn supports_jump(mode: CharacterMode, dimension: SceneDimension) -> bool {
+        match mode {
+            CharacterMode::Spatial => dimension == SceneDimension::ThreeD,
+            CharacterMode::SideScroller => true,
+            CharacterMode::TopDown2d => false,
+        }
+    }
+
+    pub fn apply(self, controller: &mut CharacterController) -> Result<(), &'static str> {
+        if !Self::SPEED_RANGE.contains(&self.speed) || !Self::JUMP_RANGE.contains(&self.jump_speed)
+        {
+            return Err("Move speed must be 0.1–50 and jump speed must be 0–30");
+        }
+        controller.speed = self.speed;
+        controller.jump_speed = self.jump_speed;
+        Ok(())
     }
 }
 
@@ -96,7 +153,18 @@ impl CharacterMotion {
     pub(crate) fn direction(&self, input: &GameInput, forward: Vec3) -> Vec3 {
         let x = input_axis(input, InputAction::MoveRight, InputAction::MoveLeft);
         match self.config.mode {
-            CharacterMode::Spatial => move_direction(input, forward),
+            CharacterMode::Spatial => {
+                let speed = if input.sneak {
+                    0.3
+                } else if input.sprint
+                    && input_axis(input, InputAction::MoveForward, InputAction::MoveBackward) > 0.0
+                {
+                    1.3
+                } else {
+                    1.0
+                };
+                move_direction(input, forward) * speed
+            }
             CharacterMode::SideScroller => Vec3::X * x,
             CharacterMode::TopDown2d => Vec3::new(
                 x,
@@ -212,6 +280,25 @@ mod tests {
     use crate::{Body, CollisionLayers, Motion, physics::STEP};
     use futty_core::Transform;
     use uuid::Uuid;
+
+    #[test]
+    fn spatial_speed_modifiers_preserve_direction_and_prioritize_sneak() {
+        let character = CharacterMotion::new(CharacterController::default());
+        let mut input = GameInput {
+            forward: true,
+            right: true,
+            ..Default::default()
+        };
+        let walking = character.direction(&input, Vec3::NEG_Z);
+        assert!((walking.length() - 1.0).abs() < 1e-6);
+        input.sprint = true;
+        assert_eq!(character.direction(&input, Vec3::NEG_Z), walking * 1.3);
+        input.sneak = true;
+        assert_eq!(character.direction(&input, Vec3::NEG_Z), walking * 0.3);
+        input.sneak = false;
+        input.forward = false;
+        assert_eq!(character.direction(&input, Vec3::NEG_Z), Vec3::X);
+    }
 
     #[test]
     fn side_scroller_accepts_early_and_late_presses_once() {

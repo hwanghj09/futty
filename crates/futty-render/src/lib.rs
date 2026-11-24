@@ -181,6 +181,7 @@ impl SceneUniform {
         scene: &RenderScene<'_>,
         shadow: &shadow::ShadowMap,
         [width, height]: [u32; 2],
+        shadow_scale: f32,
     ) -> (Self, Option<Mat4>) {
         let mut lights = [LightUniform::zeroed(); MAX_LIGHTS];
         let mut count = 0;
@@ -202,12 +203,13 @@ impl SceneUniform {
                     // shortcut: use the first shadow-casting sun, add more maps for multiple shadowed suns.
                     if shadow_projection.is_none()
                         && light.cast_shadows
+                        && shadow_scale > 0.0
                         && light.intensity > 0.0
                         && direction != Vec3::ZERO
                         && scene.camera_position.is_finite()
                     {
                         shadow_light = (count + 1) as f32;
-                        shadow_distance = light.shadow_distance;
+                        shadow_distance = light.shadow_distance * shadow_scale;
                         shadow_projection = Some(shadow.projection(
                             scene.camera_position,
                             direction,
@@ -719,7 +721,20 @@ impl Renderer {
         device: &gpu::Device,
         queue: &gpu::Queue,
         targets: &Targets,
+        scene: RenderScene<'_>,
+    ) {
+        self.draw_with_shadow_scale(device, queue, targets, scene, 1.0);
+    }
+
+    /// Multiply the authored directional shadow distance by a factor from 0 to 1.
+    /// Zero skips the shadow pass while preserving direct lighting.
+    pub fn draw_with_shadow_scale(
+        &mut self,
+        device: &gpu::Device,
+        queue: &gpu::Queue,
+        targets: &Targets,
         mut scene: RenderScene<'_>,
+        shadow_scale: f32,
     ) {
         let pixel_view = scene
             .pixel_view
@@ -729,7 +744,12 @@ impl Renderer {
             scene.view_projection = view.view_projection(width as f32 / height as f32);
             scene.camera_position = view.eye;
         }
-        let (uniform, shadow_projection) = SceneUniform::new(&scene, &self.shadow, targets.size);
+        let (uniform, shadow_projection) = SceneUniform::new(
+            &scene,
+            &self.shadow,
+            targets.size,
+            shadow_scale.clamp(0.0, 1.0),
+        );
         let RenderScene {
             view_projection,
             objects,
@@ -1351,13 +1371,13 @@ mod tests {
             object(Mat4::from_translation(Vec3::Y * 1.3), Primitive::Cube),
         ];
         let mut sun = Light::new(LightKind::Directional);
-        let mut frame = |light| {
+        let mut frame = |light, shadow_scale| {
             let source = LightInstance {
                 light,
                 position: Vec3::ZERO,
                 toward_light: Vec3::new(-1.8, 2.0, 0.0),
             };
-            renderer.draw(
+            renderer.draw_with_shadow_scale(
                 &device,
                 &queue,
                 &targets,
@@ -1370,6 +1390,7 @@ mod tests {
                     lights: std::slice::from_ref(&source),
                     grid: false,
                 },
+                shadow_scale,
             );
             let rgba = pixels(&device, &queue, &targets);
             let sample = |world| {
@@ -1380,14 +1401,16 @@ mod tests {
             };
             [sample(Vec3::X * 1.17), sample(Vec3::new(-2.0, 0.0, -1.0))]
         };
-        let [shadow, lit] = frame(sun);
+        let [shadow, lit] = frame(sun, 1.0);
+        let without_shadow_pass = frame(sun, 0.0);
         sun.cast_shadows = false;
-        let [clear, unrelated] = frame(sun);
+        let [clear, unrelated] = frame(sun, 1.0);
+        assert_eq!(without_shadow_pass, [clear, unrelated]);
         assert!(clear > shadow + 25, "Shadow {shadow}, unshadowed {clear}");
         assert!(lit.abs_diff(unrelated) <= 2);
         sun.cast_shadows = true;
         sun.shadow_distance = 2.0;
-        let [outside, _] = frame(sun);
+        let [outside, _] = frame(sun, 1.0);
         assert!(outside.abs_diff(clear) <= 2);
     }
 

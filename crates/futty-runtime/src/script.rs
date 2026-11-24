@@ -118,6 +118,10 @@ pub struct GameInput {
     pub left: bool,
     pub right: bool,
     pub held: Vec<&'static str>,
+    pub pressed_keys: Vec<&'static str>,
+    pub wheel_y: f32,
+    pub sprint: bool,
+    pub sneak: bool,
     pub range: crate::RangeInput,
     pub actions: [ActionState; InputAction::ALL.len()],
     pub mouse_delta: Vec2,
@@ -743,6 +747,18 @@ impl Scripts {
                 .iter()
                 .any(|held| held.eq_ignore_ascii_case(&key))
         });
+        let keys = effects.clone();
+        engine.register_fn("key_pressed", move |key: ImmutableString| {
+            keys.borrow()
+                .input
+                .pressed_keys
+                .iter()
+                .any(|pressed| pressed.eq_ignore_ascii_case(&key))
+        });
+        let pointer = effects.clone();
+        engine.register_fn("mouse_wheel_y", move || {
+            FLOAT::from(pointer.borrow().input.wheel_y)
+        });
         let parameters = effects.clone();
         engine.register_fn(
             "param",
@@ -769,6 +785,17 @@ impl Scripts {
                 ]))
             },
         );
+        let facing = effects.clone();
+        engine.register_fn("get_forward", move |entity: EntityRef| -> RhaiResult<Map> {
+            let effects = facing.borrow();
+            check_owner(&effects, entity)?;
+            let [x, y, z] = (effects.pose.rotation * Vec3::NEG_Z).to_array();
+            Ok(Map::from([
+                ("x".into(), FLOAT::from(x).into()),
+                ("y".into(), FLOAT::from(y).into()),
+                ("z".into(), FLOAT::from(z).into()),
+            ]))
+        });
         let yaw = effects.clone();
         engine.register_fn(
             "rotate_y",

@@ -95,6 +95,18 @@ GLB의 이동·회전·스케일 채널과 Linear·Step·Cubic Spline 보간을 
 - **Camera 메뉴의 Reset View**로 Scene 카메라를 초기 위치로 되돌립니다. **Fly Speed**는 우클릭 상태에서 WASD·Q/E로 이동하는 속도를 조절합니다.
 - **Background 메뉴**에서 **Sky**와 **Solid**를 전환합니다. 설정은 씬에 저장되고 Game 미리보기, Play, 내보낸 Windows 게임에도 반영됩니다. 새 씬은 Sky로 시작하고 기존 씬은 Solid로 열립니다.
 
+## EXE에 포함된 MCP와 스킬
+
+Windows 에디터의 **AI** 메뉴에서 **Codex**, **Claude Code**, **Claude Desktop** 중 사용하는 앱을 선택한 뒤 Futty에게 맡길 프로젝트 폴더를 고릅니다. 그 폴더가 MCP 작업 경로가 됩니다. 설치에는 저장소나 Rust가 필요하지 않습니다.
+
+| 앱 | 연결과 스킬 |
+| --- | --- |
+| Codex | 설치된 Codex CLI로 Futty를 등록합니다. 프로젝트를 새 채팅에서 열면 `.agents/skills`의 스킬을 사용할 수 있습니다. |
+| Claude Code | 프로젝트의 `.mcp.json`을 갱신하고 `.claude/skills`에 스킬을 둡니다. 프로젝트에서 새 세션을 열고 Futty MCP를 승인합니다. |
+| Claude Desktop | 앱을 한 번 실행한 뒤 **AI → Claude Desktop**을 사용하고 앱을 완전히 종료했다가 다시 엽니다. 스킬은 `.futty/claude-skills`의 ZIP을 **Customize → Skills**에서 가져옵니다. [Claude 스킬 가져오기](https://support.claude.com/en/articles/12512180-use-skills-in-claude) |
+
+등록된 클라이언트는 `futty-editor.exe --mcp <작업 폴더>`로 같은 EXE의 서버 모드를 실행합니다. EXE를 옮겼다면 같은 메뉴에서 연결을 갱신합니다. `scene_inspect`에 `examples/agent-escape/Beacon Bot Escape.futty.scene.ron`을 넘겨 연결을 확인할 수 있습니다.
+
 ## Codex에서 Futty MCP 사용하기
 
 GitHub에서 저장소를 클론하거나 **Code → Download ZIP**으로 받아 압축을 풉니다. Codex에서 Futty 폴더를 열고 **“Futty MCP 연결해줘”**라고 입력하면 저장소의 `AGENTS.md`에 따라 설치 스크립트를 실행합니다.
@@ -232,6 +244,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/connect-mcp.ps1 -Cli
 
 - `input_get`에 씬 `path`를 넘겨 저장된 입력 설정과 기본 바인딩을 확인합니다.
 - `input_set`은 해당 씬의 입력 설정 전체를 교체합니다. 지정한 항목은 에디터 Play와 단독 게임에 적용되고, 나머지는 플레이어의 **F10 → Game Controls** 설정을 사용합니다. 프로젝트에서 씬을 전환하면 새 씬의 입력 설정이 적용됩니다.
+- `capture_mouse: true`를 지정하면 게임 화면을 클릭했을 때 마우스를 잠그고, 버튼을 누르지 않아도 마우스 이동으로 시점을 돌립니다. `Esc` 또는 창 포커스 해제로 마우스 잠금을 풉니다. 이 모드에서 `Ctrl`은 전진 중 달리기, `Shift`는 느리게 걷기입니다.
 
 ```json
 {
@@ -385,6 +398,31 @@ Rhai의 `finish_game("success")` 또는 `finish_game("failure")`로 플레이 �
 [Beacon Bot Escape 플레이테스트 입력](../examples/agent-escape/playtest.json)을 `play_test`에 넘기면 스위치를 켜고 문을 통과하는 경로를 검사합니다. 테스트에서 바로 리플레이를 남기려면 `"replay_path":"target/escape.replay.json"`을 추가합니다. 저장할 폴더는 이미 있어야 하며 같은 이름의 파일은 보존됩니다.
 
 리플레이는 포맷·엔진 버전, 씬 경로, 씬과 스크립트의 지문, 시드, 행동, 틱별 상태 검증값을 저장합니다. 시드는 플레이 중 생성되는 프리팹 ID에 적용되며, `play_start`에서도 지정할 수 있습니다. 같은 엔진과 실행 환경에서 비교합니다. 씬이나 스크립트가 바뀌면 `source_changed`가, 기록의 상태와 재실행이 처음 어긋나면 `state_changed`가 반환됩니다.
+
+## Futty Ghost 자동 플레이테스트
+
+`ghost_batch_run`은 동일한 저장 씬을 규칙 기반 플레이어와 시드 조합으로 실행합니다. 기본 대상은 `coin` 태그이며, 가까운 가시 대상을 따라가면서 기존 게임의 성공·실패 판정을 기록합니다.
+
+| 플레이어 유형 | 행동 |
+| --- | --- |
+| `beginner` | 시드에 따라 잠깐 기다린 뒤 대상을 따라갑니다. |
+| `explorer` | 시드에 따라 좌우를 먼저 탐색하고, 상호작용 대상이 보이면 시도합니다. |
+| `goal_driven` | 바로 대상을 향해 움직입니다. 사이드스크롤 씬에서 앞쪽 바닥이 끊기면 점프를 시도합니다. |
+
+먼저 `game_create_from_template`에 `{"template":"coin_runner_2d","output_path":"Coin-Runner"}`를 전달합니다. 이어서 `ghost_batch_run`을 호출합니다.
+
+```json
+{
+  "path": "Coin-Runner/Coin Runner.futty.scene.ron",
+  "output_path": "Coin-Runner/Ghost",
+  "seeds": [11, 22, 33],
+  "max_ticks": 360
+}
+```
+
+결과에 유형별 성공 횟수, 실행별 종료 틱·플레이어 위치·HUD와 리플레이 경로가 포함됩니다. `first_failure_tick`은 게임이 실패를 판정했거나 틱 한도에 도달한 틱을 기록합니다. `first_stall_tick`은 30틱 연속 이동 입력이 들어왔는데 이동 평면에서 시작 위치와의 거리가 0.02 월드 단위에 이르지 못한 구간의 시작입니다. 개별 실행은 반환된 `replay_path`를 `play_replay`의 `path`로 전달해 재현할 수 있습니다.
+
+각 실행은 최대 1,200틱, 한 배치는 최대 12,000틱입니다. 결과 폴더에 `report.json`과 실행별 리플레이를 저장합니다. 기본 이동은 화면에 보이는 태그 대상과 근거리 바닥 검사에 기반하며, 복잡한 미로의 경로 탐색은 별도 정책이 필요합니다.
 
 ## Pulse Range
 
@@ -683,6 +721,7 @@ fn on_update(entity, dt) {
 - `fields()`의 숫자·불리언·텍스트는 Inspector에서 오브젝트별로 조절합니다. `param("speed")`로 값을 읽고, `this.counter` 같은 상태는 오브젝트마다 이번 Play 동안 유지합니다.
 - **Window → Game Controls** 또는 **F10**에서 키·마우스 버튼과 감도를 바꿀 수 있습니다. 단독 실행에서도 **F10**으로 열 수 있습니다. 설정은 에디터와 단독 실행 앱의 사용자 설정에 각각 저장됩니다.
 - Rhai에서 `input_down("MoveForward")`, `input_pressed("Fire")`, `input_released("Fire")`로 입력을 읽습니다. `MoveForward`, `MoveBackward`, `MoveLeft`, `MoveRight`, `Jump`, `Fire`, `Reload`, `Interact`, `Retry`를 지원합니다. 직접 키를 읽는 `key_down("Space")`와 감도를 반영한 `mouse_delta_x()`·`mouse_delta_y()`도 사용할 수 있습니다.
+- `key_pressed("3")`로 숫자 키를 짧게 누른 프레임을 읽고, `mouse_wheel_y()`로 해당 프레임의 휠 이동량을 읽을 수 있습니다.
 - **Inspector → Tags**에 `door` 같은 태그를 입력합니다. `find_tag("door")`는 첫 번째 오브젝트를, `find_all_tagged("door")`는 해당 태그의 오브젝트 목록을 반환합니다. 대상이 없으면 각각 `()`와 빈 배열을 반환합니다.
 - `send_event(target, "open")`은 대상 스크립트의 `on_message(entity, sender, name)`을 다음 틱에서 호출합니다. 예를 들어 `input_pressed("Interact")`일 때 스위치가 문에 `open` 이벤트를 보낼 수 있습니다.
 - `spawn_prefab("Crate", 2, 0, 0)`은 다음 틱에서 프리팹 계층을 생성하며 루트 핸들을 반환합니다. `despawn(root)`으로 생성한 계층 전체를 제거합니다. Play 중 생성·제거는 저장한 편집 씬과 분리되어 실행됩니다.
@@ -702,6 +741,43 @@ fn on_update(entity, dt) {
 
 [Pulse Range 프로젝트](../examples/pulse-range/Pulse%20Range.futty.project.ron)를 **File → Project → Open Project…**에서 열고 **Play → Enter practice range**를 눌러 로비에서 연습장으로 전환할 수 있습니다.
 
+## Futty Live Surgery
+
+저장된 씬에서 선택한 오브젝트의 색상과 동작 스크립트를 한 번에 수정합니다. `surgery_preview`는 파일을 쓰기 전에 바뀔 필드와 영향받는 UUID를 반환합니다. 색상과 스크립트 중 하나만 보낼 수도 있습니다.
+
+```json
+{
+  "path": "Main.futty.scene.ron",
+  "object_id": "<문 오브젝트 UUID>",
+  "color": [0.9, 0.1, 0.08],
+  "script": {"name": "Exit door", "source": "fn on_start(entity) { this.opened = false; } fn on_message(entity, sender, name) { if name == \"open\" && !this.opened { this.opened = true; translate(entity, 0.0, 3.2, 0.0); } }"}
+}
+```
+
+교체 스크립트는 Rhai 컴파일 검사를 거쳐 새 에셋으로 선택한 오브젝트에만 연결됩니다. 기존 스크립트와 다른 오브젝트의 바인딩은 유지됩니다. 교체할 오브젝트의 스크립트 필드값이 초기화되면 응답에 `clears_script_fields`가 표시됩니다. 프리팹까지 바뀌는 요청은 여러 오브젝트의 영향을 볼 수 있는 `scene_preview_ops`로 검토하세요.
+
+같은 세션에서 `surgery_apply`에 `path`와 최신 `preview_token`을 보내 저장합니다. 미리보기 이후 저장 파일이 바뀌면 다시 미리보기해야 합니다. 다음 Play에서 동작을 확인하거나 `play_test`로 회귀 검증할 수 있습니다. `surgery_rollback`에 같은 경로와 응답의 `undo_token`을 보내면 현재 파일이 적용 당시와 일치할 때 마지막 변경을 되돌립니다.
+
+### Play 중 색상 다시 불러오기
+
+에디터에서 저장된 씬의 오브젝트를 선택하고 **Play**를 시작합니다. 다른 MCP 세션에서 `surgery_apply`로 해당 오브젝트 색상을 저장한 뒤, 에디터에서 **Window → Reload Selected Tint in Play**를 누르면 현재 플레이를 유지하면서 새 색상을 볼 수 있습니다. 편집 씬에도 디스크 변경을 읽어 오려면 Play를 종료하고 씬을 다시 엽니다.
+
+MCP에서는 `play_start`로 헤드리스 세션을 열고 `surgery_hot_reload`에 마지막 관찰의 `session_id`, `expected_tick`과 `tint: {"object_id":"<UUID>","color":[0.9,0.1,0.08]}`를 보냅니다. 다음 `play_step`이 첫 틱 직전에 색을 바꿉니다. 그 사이 씬 파일과 현재 플레이 상태는 그대로이며, 적용된 색상은 저장한 리플레이에서 재현됩니다.
+
+## Futty Feel 캐릭터 조절
+
+에디터에서 캐릭터를 선택하고 **Window → Futty Feel**을 엽니다. 이동 속도와 점프 속도를 슬라이더나 숫자 입력으로 조절하거나 **Steady**, **Default**, **Agile** 프리셋에서 시작할 수 있습니다. 탑다운 캐릭터는 이동 속도를 조절합니다.
+
+- **Preview in Play**는 초안 값을 사용해 Play를 시작합니다. **Stop Play**로 나오면 편집 씬은 그대로이며, 초안을 다시 조절할 수 있습니다.
+- **Apply**로 편집 씬에 반영하고 **Save Scene**으로 디스크에 저장합니다. **Reset draft**로 초안의 원래 값을 복원하고, 반영한 변경은 **Undo**로 되돌릴 수 있습니다.
+- MCP에서는 씬 `path`와 캐릭터 `object_id`로 `feel_get`을 호출합니다. `feel_preview`에 같은 대상과 `speed` 또는 `jump_speed`를 보내면 저장 없이 변경 내용을 확인할 수 있습니다. `feel_apply`에 확인한 `expected_revision`을 함께 보내 저장하고, 응답의 `undo_token`은 `scene_undo`에 사용합니다. 씬을 먼저 저장하고 MCP 변경 뒤 에디터에서 다시 여세요.
+
+## 실행 중 자동 그래픽 품질
+
+에디터의 **Play**와 Windows로 내보낸 게임에서 기본으로 작동합니다. 느린 프레임이 지속되면 게임 화면의 내부 렌더 해상도를 100%에서 85%, 70%, 55% 순으로 낮춥니다. 첫 단계에서는 방향광 그림자 거리를 줄이고, 더 낮은 단계에서는 그림자 렌더링을 생략합니다. 프레임에 여유가 수 초간 이어지면 한 단계씩 원래 품질로 돌아갑니다.
+
+픽셀 퍼펙트 카메라는 픽셀 정렬을 유지하도록 원래 해상도를 사용합니다. HUD는 창의 해상도로 그리며, 물리와 게임 규칙은 기존 타이밍으로 실행합니다.
+
 ## Windows 게임 내보내기
 
 **File → Export Windows Game…**에서 저장한 씬의 출력 위치를 선택합니다. 만들어진 `*-Windows` 폴더는 씬, 참조 에셋, 실행 설정과 `Game.exe`를 포함합니다. 폴더 전체를 옮긴 뒤 `Game.exe`를 실행하면 에디터 없이 게임이 열립니다. 씬에 카메라가 없으면 내보내기 당시의 Scene 카메라로 실행합니다.
@@ -714,7 +790,7 @@ MCP에서는 `project_build`를 사용합니다. 에디터를 열지 않고 프�
 {"path":"examples/pulse-range/Pulse Range.futty.project.ron","output_path":"Pulse-Range-Windows"}
 ```
 
-입력과 출력은 MCP 작업 폴더 기준입니다. 기본 플레이어는 저장소의 `dist/futty-editor.exe`이며, 다른 Windows x64 Futty 빌드를 사용하려면 `template_path`를 넘깁니다. 출력은 아직 없는 폴더여야 합니다. 완성된 Windows 빌드는 폴더 전체를 옮긴 다음 `Game.exe`를 실행하세요.
+입력과 출력은 MCP 작업 폴더 기준입니다. EXE에 포함된 MCP는 그 EXE를 기본 플레이어로 사용하고, 별도로 실행한 MCP 서버는 작업 폴더의 `dist/futty-editor.exe`를 사용합니다. 다른 Windows x64 Futty 빌드를 사용하려면 `template_path`를 넘깁니다. 출력은 아직 없는 폴더여야 합니다. 완성된 Windows 빌드는 폴더 전체를 옮긴 다음 `Game.exe`를 실행하세요.
 
 Windows x64에서 CLI로도 실행할 수 있습니다. Futty는 새 콘솔 창을 열지 않습니다. PowerShell에서 `| Out-Host`를 붙이면 내보내기가 끝날 때까지 기다리고 결과를 현재 터미널에서 확인할 수 있습니다. 출력은 아직 없는 폴더를 지정합니다. 씬에 카메라가 없으면 CLI는 기본 카메라를 사용합니다.
 
@@ -722,6 +798,26 @@ Windows x64에서 CLI로도 실행할 수 있습니다. Futty는 새 콘솔 창�
 .\futty-editor.exe --export .\Main.futty.scene.ron .\Main-Windows | Out-Host
 .\futty-editor.exe --export ".\examples\pulse-range\Pulse Range.futty.project.ron" .\Pulse-Range-Windows | Out-Host
 ```
+
+### 서명된 Windows 릴리스 준비
+
+공개 배포에는 공개적으로 신뢰되는 코드 서명 인증서와 개인 키에 접근할 수 있는 서명 도구가 필요합니다. Windows SDK의 SignTool이 사용할 수 있는 인증서가 있다면 릴리스 모드로 빌드한 뒤 아래 명령을 실행합니다. `ExpectedPublisher`에는 인증서에 표시될 게시자 이름을 입력합니다. [Microsoft 코드 서명 옵션](https://learn.microsoft.com/windows/apps/package-and-deploy/code-signing-options) · [SignTool 사용법](https://learn.microsoft.com/windows/win32/seccrypto/signtool)
+
+```powershell
+cargo build --locked --release -p futty-editor
+.\scripts\prepare-windows-release.ps1 `
+    -Executable .\target\release\futty-editor.exe `
+    -OutputDirectory .\target\Futty-Windows-Release `
+    -ExpectedPublisher '인증서에 표시된 게시자 이름' `
+    -CertificateThumbprint '인증서 지문 40자리'
+```
+
+- `signtool.exe`가 PATH에 없으면 `-SignToolPath`로 Windows SDK의 실행 파일 경로를 지정합니다. 인증서 발급자가 별도 RFC 3161 타임스탬프 주소를 제공하면 `-TimestampUrl`로 지정합니다.
+- 인증서 발급자의 도구나 클라우드 서비스로 이미 서명했다면 위 명령에서 `-CertificateThumbprint`를 생략하고 서명된 EXE를 넘깁니다.
+- 스크립트는 서명된 복사본에 포함된 Authenticode 서명, 게시자 이름과 타임스탬프를 확인합니다. 검증을 통과한 `futty-editor.exe`와 `SHA256SUMS.txt`를 GitHub Releases의 같은 버전에 첨부합니다.
+- 서명된 에디터에서 게임을 내보내면 같은 실행 파일이 `Game.exe`로 복사되어 서명이 유지됩니다. MCP로 내보낼 때는 서명된 EXE의 작업 폴더 상대 경로를 `template_path`에 지정합니다.
+
+새로 서명된 파일도 게시자나 파일의 평판이 쌓일 때까지 SmartScreen 경고가 표시될 수 있습니다. [Microsoft SmartScreen 안내](https://learn.microsoft.com/windows/apps/package-and-deploy/smartscreen-reputation)
 
 ## 검증
 

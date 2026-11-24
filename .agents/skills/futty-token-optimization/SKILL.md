@@ -8,7 +8,7 @@ description: Keep Futty development context small when investigating Rust build 
 ## Shell and source
 
 - Check for RTK when a command is likely to produce large output. If available, use `rtk git status` and `rtk cargo test -p futty-mcp` for compact output. Otherwise use Git's short status and target the relevant Cargo package or test.
-- Locate symbols with `rg -n` and read the relevant ranges. Start from `crates/futty-mcp/src/main.rs` for tool routing and the relevant runtime module for scene behavior. Inspect examples directly when their saved data is the subject of the task.
+- Locate symbols with `rg -n` and read the relevant ranges. In a source checkout, start from `crates/futty-mcp/src/lib.rs` for tool routing and the relevant runtime module for scene behavior. Inspect examples directly when their saved data is the subject of the task.
 - If a filtered command fails, recover its exact error with `rtk proxy` or the native command and narrow the read around that diagnostic. Keep exit status, file and line, and the first relevant error when summarizing.
 
 ## Futty MCP
